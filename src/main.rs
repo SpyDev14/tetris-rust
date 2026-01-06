@@ -13,8 +13,9 @@ struct Position<T> {
 	x: T, y: T,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 enum Directions {
+	NoDirections = 0,
 	// Two = 2,
 	Four = 4,
 }
@@ -29,6 +30,10 @@ impl Figure {
 }
 
 fn rotate_current_figure(figure: &Figure, current_rotation: &mut u8, by_clockwise: bool) {
+	if figure.directions == Directions::NoDirections {
+		return;
+	}
+
 	let directions_count = figure.directions as u8;
 
 	match by_clockwise {
@@ -56,8 +61,6 @@ const MAX_FPS: u16 = 60;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
 const BASE_LOWERING_FIGURE_DURATION: Duration = Duration::from_millis(2500); // 2.5s
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let mut is_running = true;
-
 	// Current figure
 	let current_figure = Figure::get_random();
 	let mut current_rotation: u8 = 0;
@@ -73,20 +76,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	// Figure lowering
 	let mut last_lowering_figure_time = Instant::now();
 
-	// Other
-	let mut events_buffer = VecDeque::new();
 
 	terminal::enable_raw_mode()?;
-	while is_running {
+	'main: loop {
 		let frame_start_time = Instant::now();
 		let delta_time = frame_start_time.duration_since(previous_time);
 		previous_time = frame_start_time;
 
-		events_buffer.clear();
+		let mut should_show_log = false;
 
-		let mut figure_moved = false;
+		let mut events_buffer = VecDeque::new();
 
-		// Собираем ВСЕ события, доступные сейчас
 		while poll(Duration::from_millis(0))? {
 			match event::read()? {
 				Event::Key(key_event) => {
@@ -101,13 +101,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				if !key_event.is_release() {
 					continue;
 				}
-				figure_moved = true;
+				should_show_log = true;
 
 				match key_event.code {
 					KeyCode::Esc => {
 						println!("Esc - выход");
-						is_running = false;
-						break;
+						break 'main;
 					}
 					KeyCode::Down => {
 						println!("↓");
@@ -140,11 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			current_pos.y += 1;
 			last_lowering_figure_time = frame_start_time;
 
-			figure_moved = true;
+			should_show_log = true;
 		}
 
 		// Debug вывод информации раз в 3 секунды
-		if figure_moved {
+		if should_show_log {
 			println!("{:?}, Rotation: {}\nDelta time: {:?}", current_pos, current_rotation, delta_time);
 		}
 
