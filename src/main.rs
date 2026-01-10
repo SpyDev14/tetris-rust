@@ -95,7 +95,6 @@ fn collect_last_released_keys() -> UniversalResult<Vec<KeyCode>>{
 }
 
 struct FrameUpdateData {
-	_delta_time: Duration,
 	frame_start_time: Instant,
 }
 
@@ -445,18 +444,13 @@ fn is_running() -> bool {
 fn main() -> UniversalProcedureResult {
 	let mut state = GameState::new(5);
 
-	// for delta time
-	let mut previous_frame_start_time = Instant::now();
-
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
 	while is_running() {
 		let frame_start_time = Instant::now();
-		let delta_time = frame_start_time.duration_since(previous_frame_start_time);
-		previous_frame_start_time = frame_start_time;
 
-		state.update(&FrameUpdateData { _delta_time: delta_time, frame_start_time })?;
+		state.update(&FrameUpdateData { frame_start_time })?;
 		out.execute(MoveTo(0, 0))?;
 		state.update_gui()?;
 
