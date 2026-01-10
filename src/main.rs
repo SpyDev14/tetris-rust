@@ -1,4 +1,5 @@
-use std::cmp::max;
+use std::cmp::{min};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::io::{Stdout, stdout};
@@ -7,13 +8,22 @@ use std::iter;
 use bitvec::prelude::*;
 use itertools::{EitherOrBoth, Itertools};
 use rand::{
+	rngs::ThreadRng,
 	seq::IndexedRandom,
 	rng,
 };
 
 use crossterm::{
 	ExecutableCommand,
-	style::{Print, Color, SetColors, Colors, ResetColor},
+	style::{
+		Print,
+		Color,
+		SetColors,
+		Colors,
+		ResetColor,
+		SetAttribute,
+		Attribute,
+	},
 	terminal::{self, Clear, ClearType},
 	cursor::{self, MoveTo, MoveToNextLine},
 	event::{self, Event, KeyCode, poll},
@@ -90,58 +100,49 @@ struct FrameUpdateData {
 }
 
 struct GameState {
-	is_running: bool,
-
 	current_figure: &'static Figure,
 	current_figure_position: Position<i8>,
 	current_figure_rotation: Direction,
 
 	next_figure: &'static Figure,
-	last_figure_lowering_time: Instant,
-	lines_hit: u16,
-	score: u16,
-	start_time: Instant,
-
 	board: Board,
+
+	start_level: u8,
+	lines_hit: u16, // Не увеличивать, если ур. = 29 чтобы избежать переполнения
+	score: u64,
+
+	last_figure_lowering_time: Instant,
+	start_time: Instant,
 }
 impl GameState {
-	const BASE_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(2500); // 2.5s  | 2 раза за 5 секунд
-	const MIN_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(250);   // 0.25s | 4 раза в секунду
+	pub fn new(start_level: u8) -> Self {
+		let mut rng = rng();
 
-	pub fn new() -> Self {
 		Self {
-			is_running: true,
-
-			current_figure: Figure::get_random(),
+			current_figure: Figure::choose_random(&mut rng),
 			current_figure_position: Position { x: 0, y: 0 },
 			current_figure_rotation: Direction::South,
 
-			next_figure: Figure::get_random(),
-			last_figure_lowering_time: Instant::now(),
+			next_figure: Figure::choose_random(&mut rng),
+			board: Board::new(Size {height: 15, width: 10}),
+
+			start_level,
 			lines_hit: 0,
 			score: 0,
-			start_time: Instant::now(),
 
-			board: Board::new(Size {height: 15, width: 10}),
+			last_figure_lowering_time: Instant::now(),
+			start_time: Instant::now(),
 		}
 	}
 
-	pub fn is_running(&self) -> bool {
-		self.is_running
-	}
-
-	pub fn stop(&mut self) {
-		self.is_running = false;
-	}
-
 	pub fn update(&mut self, data: &FrameUpdateData) -> UniversalProcedureResult {
-		let keys_to_process = collect_last_released_keys()?;
+		let last_released_keys = collect_last_released_keys()?;
 
-		if !keys_to_process.is_empty() {
-			for key_code in keys_to_process.iter() {
+		if !last_released_keys.is_empty() {
+			for key_code in last_released_keys.iter() {
 				match key_code {
 					KeyCode::Esc => {
-						self.stop();
+						exit_from_game();
 						return Ok(());
 					}
 					KeyCode::Down => {
@@ -165,10 +166,7 @@ impl GameState {
 		}
 
 		// Опускание фигуры
-		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.get_figure_lowering_duration() {
-			// self.current_figure_position.y += 1; // Временно
-			self.last_figure_lowering_time = data.frame_start_time;
-		}
+		self.lower_current_figure_if_should(data);
 
 		Ok(())
 	}
@@ -187,13 +185,10 @@ impl GameState {
 		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = [' ', ' '];
 		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = [' ', ' '];
 
-		let mut out = stdout();
-		out.execute(MoveTo(0, 0))?;
-
 		let statistics_part: Vec<String> = {
 			let round_total_seconds = self.start_time.elapsed().as_secs();
 			let label_and_value = [
-				("УРОВЕНЬ:", self.get_level().to_string()),
+				("УРОВЕНЬ:", self.level().to_string()),
 				("ВРЕМЯ:", 	format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
 				("СЧЁТ:", 	self.score.to_string()),
 			];
@@ -275,6 +270,7 @@ impl GameState {
 		let stat_part_width = statistics_part.required_width();
 		let board_part_width = board_part.required_width();
 
+		let mut out: Stdout = stdout();
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			let stat_and_board_lines: (&str, &str) = match pair {
 				EitherOrBoth::Both(stat, board) => (stat, board),
@@ -307,14 +303,30 @@ impl GameState {
 		}
 	}
 
-	fn get_figure_lowering_duration(&self) -> Duration {
-		max(
-			Self::BASE_FIGURE_LOWERING_DURATION - Duration::from_millis(self.get_level() as u64 * 10),
-			Self::MIN_FIGURE_LOWERING_DURATION
-		)
+	fn lower_current_figure_if_should(&mut self, data: &FrameUpdateData) {
+		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
+			// self.current_figure_position.y += 1; // Временно
+			self.last_figure_lowering_time = data.frame_start_time;
+		}
 	}
-	fn get_level(&self) -> u16 {
-		self.lines_hit + 1
+
+	fn figure_lowering_duration(&self) -> Duration {
+		let level = self.level();
+		match level {
+			// 0-8 ур. от 800мс до 100мс с линейным изменением
+			0..=8 => Duration::from_micros(8000 - (835 * level as u64)),
+			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
+			// С формулой мудрить не стал
+			9 => Duration::from_millis(100),
+			10..=12 => Duration::from_millis(83),
+			13..=15 => Duration::from_millis(67),
+			16..=18 => Duration::from_millis(50),
+			19..=28 => Duration::from_millis(33),
+			_ => Duration::from_millis(17)
+		}
+	}
+	fn level(&self) -> u8 {
+		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
 	}
 }
 
@@ -386,9 +398,8 @@ impl Figure {
 		},
 	];
 
-	pub fn get_random() -> &'static Self {
-		let mut r = rng();
-		Self::VARIANTS.choose(&mut r).unwrap()
+	pub fn choose_random(rng: &mut ThreadRng) -> &'static Self {
+		Self::VARIANTS.choose(rng).unwrap()
 	}
 }
 
@@ -398,30 +409,41 @@ type UniversalProcedureResult = UniversalResult<()>;
 
 fn on_programm_enter(out: &mut Stdout) -> UniversalProcedureResult {
 	terminal::enable_raw_mode()?;
-	out.execute(Clear(ClearType::All))?; // После всё будет заполняться пробелами
 	out.execute(SetColors(Colors::new(FOREGROUND_COLOR, BACKGROUND_COLOR)))?;
+	out.execute(SetAttribute(Attribute::Bold))?;
+	out.execute(Clear(ClearType::All))?;
 	out.execute(cursor::Hide)?;
 	Ok(())
 }
 fn on_programm_exit(out: &mut Stdout) -> UniversalProcedureResult {
+	out.execute(MoveTo(0, 0))?;
+	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
+	out.execute(Clear(ClearType::All))?;
+	out.execute(cursor::Show)?;
 	terminal::disable_raw_mode()?;
 	Ok(())
 }
 
-const FOREGROUND_COLOR: Color = Color::Green;
-const BACKGROUND_COLOR: Color = Color::Black;
 
-const MAX_FPS: u16 = 60;
-const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
+const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
+const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
+
+const FPS_LIMIT: u16 = 10;
+const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 // Время на 1 кадр ↑
 
-// TODO: Реализовать идею
-// static mut IS_RUNNING: bool = true;
-// fn exit_game()
+
+static IS_RUNNING: AtomicBool = AtomicBool::new(true);
+pub fn exit_from_game() {
+	IS_RUNNING.store(false, Ordering::Release);
+}
+fn is_running() -> bool {
+	IS_RUNNING.load(Ordering::Acquire)
+}
 
 fn main() -> UniversalProcedureResult {
-	let mut game = GameState::new();
+	let mut state = GameState::new(5);
 
 	// for delta time
 	let mut previous_frame_start_time = Instant::now();
@@ -429,19 +451,16 @@ fn main() -> UniversalProcedureResult {
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
-	while game.is_running() {
+	while is_running() {
 		let frame_start_time = Instant::now();
 		let delta_time = frame_start_time.duration_since(previous_frame_start_time);
 		previous_frame_start_time = frame_start_time;
 
-		game.update(&FrameUpdateData { _delta_time: delta_time, frame_start_time })?;
-		game.update_gui()?;
-		// Решил вынести, т.к пускай лучше будут отдельные update методы для состояния и GUI
-		// Если будет надо, можно будет установить им разную скорость обновления
-		// А так просто как зачаток для состояния лобби и конца раунда, если решу добавить состояния
+		state.update(&FrameUpdateData { _delta_time: delta_time, frame_start_time })?;
+		out.execute(MoveTo(0, 0))?;
+		state.update_gui()?;
 
 		let frame_time = frame_start_time.elapsed();
-		// Если кадр обработался быстрее выделенного времени на кадр
 		if frame_time < FRAME_DURATION {
 			std::thread::sleep(FRAME_DURATION - frame_time);
 		}
