@@ -47,8 +47,6 @@ impl Size {
 }
 
 // -------------
-type Pixel = [char; 2];
-
 struct Board {
 	size: Size,
 	cells: BitVec,
@@ -60,13 +58,15 @@ impl Board {
 	}
 }
 
+type Pixel = [char; 2];
+
 // Хз какое название дать :/
 // Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
-trait StringsVecForUI {
+trait UIElement {
 	fn required_width(&self) -> usize;
 }
 
-impl StringsVecForUI for Vec<String> {
+impl UIElement for Vec<String> {
 	fn required_width(&self) -> usize {
 		self.iter()
 			.map(|s| s.chars().count())
@@ -100,7 +100,7 @@ struct FrameUpdateData {
 
 struct GameState {
 	current_figure: &'static Figure,
-	current_figure_position: Position<i8>,
+	current_figure_position: Position<u8>,
 	current_figure_rotation: Direction,
 
 	next_figure: &'static Figure,
@@ -116,14 +116,15 @@ struct GameState {
 impl GameState {
 	pub fn new(start_level: u8) -> Self {
 		let mut rng = rng();
+		let board = Board::new(Size {height: 15, width: 10});
 
 		Self {
 			current_figure: Figure::choose_random(&mut rng),
-			current_figure_position: Position { x: 0, y: 0 },
+			current_figure_position: Position { x: (board.size.width / 2) as u8, y: 0 },
 			current_figure_rotation: Direction::South,
 
 			next_figure: Figure::choose_random(&mut rng),
-			board: Board::new(Size {height: 15, width: 10}),
+			board,
 
 			start_level,
 			lines_hit: 0,
@@ -145,13 +146,23 @@ impl GameState {
 						return Ok(());
 					}
 					KeyCode::Down => {
-						self.current_figure_position.y += 1;
+						if self.current_figure_position.y < u8::MAX {
+							self.current_figure_position.y += 1;
+							self.last_figure_lowering_time = data.frame_start_time;
+						}
+						self.score = self.current_figure_position.y as u64;
 					}
 					KeyCode::Left => {
-						self.current_figure_position.x -= 1;
+						if self.current_figure_position.x > u8::MIN {
+							self.current_figure_position.x -= 1;
+						}
+						self.score = self.current_figure_position.x as u64;
 					}
 					KeyCode::Right => {
-						self.current_figure_position.x += 1;
+						if self.current_figure_position.x < (self.board.size.width + self.current_figure.size.width) as u8 {
+							self.current_figure_position.x += 1;
+						}
+						self.score = self.current_figure_position.x as u64;
 					}
 					KeyCode::Char('q') => {
 						self.rotate_current_figure(false);
@@ -175,14 +186,20 @@ impl GameState {
 	// Который будет выполнять всю общую логику
 	// Если такой конечно будет, а то сейчас чуть переделал и его почти не осталось
 	pub fn update_gui(&self) -> UniversalProcedureResult {
-		const EMPTY_CELL:		Pixel = [' ', '.'];
+		const EMPTY_CELL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
+		const BOARD_EMPTY_CELL:	Pixel = [' ', '.'];
 		const LEFT_BORDER:		Pixel = ['<', '!'];
 		const RIGHT_BORDER:		Pixel = ['!', '>'];
 		const BOTTOM_BORDER:	Pixel = ['=', '='];
 		const BOTTOM_CLOSING:	Pixel = ['\\','/'];
-		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = [' ', ' '];
-		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = [' ', ' '];
+		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = EMPTY_CELL;
+		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = EMPTY_CELL;
+
+		const GAP_BETWEEN_PARTS: usize = 2;
+		let str_gap = String::from_iter(
+			iter::repeat_n(' ', GAP_BETWEEN_PARTS)
+		);
 
 		let statistics_part: Vec<String> = {
 			let round_total_seconds = self.start_time.elapsed().as_secs();
@@ -191,7 +208,6 @@ impl GameState {
 				("ВРЕМЯ:", 	format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
 				("СЧЁТ:", 	self.score.to_string()),
 			];
-
 
 			let max_labels_width = label_and_value.iter()
 				.map(|(label, _)| label.chars().count())
@@ -209,18 +225,35 @@ impl GameState {
 				)
 			);
 
-			// Заглушка
-			let next_figure_part: Vec<String> = vec![
-				"  [][][]".to_string(),
-				"  []    ".to_string()
-			];
+			let mut next_figure_part: Vec<String> = vec![];
+			{
+				let figure = self.next_figure;
+				let next_figure_width = figure.size.width;
+				for row in 0..figure.size.height {
+					let start_index = row * next_figure_width;
+					let cells_row = &figure.cells[start_index..start_index + next_figure_width];
 
+					next_figure_part.push(
+						// Для корректной работы центрирования нужно всунуть здесь пару пробелов в начале
+						// Возможно, есть более идиоматичные способы, но я не стал заморачиваться
+						iter::once([' '; GAP_BETWEEN_PARTS])
+						.chain(
+							cells_row.iter().map(|cell| {
+								if *cell { FIGURE_CELL } else { EMPTY_CELL }
+							})
+						)
+						.flatten()
+						.collect::<String>()
+					);
+				}
+			}
+
+			// Отступ в 1 строку
 			let actual_width = lines.required_width();
-			// Пустая линия
 			lines.push(String::from_iter(iter::repeat(' ').take(actual_width)));
 
-			for next_figure_line in next_figure_part {
-				lines.push(format!("{:^actual_width$}", next_figure_line));
+			for line in next_figure_part.iter() {
+				lines.push(format!("{:^actual_width$}", line));
 			}
 
 			lines
@@ -232,12 +265,13 @@ impl GameState {
 
 			for row in 0..self.board.size.height {
 				let start_index = row * board_width;
+				//
 				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
 					iter::once(LEFT_BORDER)
 					.chain(cells_row.iter().map(|cell| {
-						if *cell {FIGURE_CELL} else {EMPTY_CELL}
+						if *cell {FIGURE_CELL} else {BOARD_EMPTY_CELL}
 					}))
 					.chain(iter::once(RIGHT_BORDER))
 					.flatten()
@@ -278,8 +312,8 @@ impl GameState {
 			};
 
 			out.execute(Print(format!(
-				"{:<stat_part_width$}  {:<board_part_width$}",
-				stat_and_board_lines.0, stat_and_board_lines.1
+				"{:<stat_part_width$}{str_gap}{:<board_part_width$}",
+				stat_and_board_lines.0, stat_and_board_lines.1,
 			)))?;
 			out.execute(MoveToNextLine(1))?;
 		}
@@ -304,7 +338,13 @@ impl GameState {
 
 	fn lower_current_figure_if_should(&mut self, data: &FrameUpdateData) {
 		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
-			// self.current_figure_position.y += 1; // Временно
+			self.current_figure_position.y += 1;
+
+			// Для отладки!!!!
+			if self.current_figure_position.y > (self.board.size.height + self.current_figure.size.height) as u8 {
+				self.current_figure_position.y = 0;
+			}
+
 			self.last_figure_lowering_time = data.frame_start_time;
 		}
 	}
@@ -313,7 +353,8 @@ impl GameState {
 		let level = self.level();
 		match level {
 			// 0-8 ур. от 800мс до 100мс с линейным изменением
-			0..=8 => Duration::from_micros(8000 - (835 * level as u64)),
+			// 1мс = 1000мкс
+			0..=8 => Duration::from_micros(800_000 - (83_500 * level as u64)),
 			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
 			// С формулой мудрить не стал
 			9 => Duration::from_millis(100),
@@ -324,6 +365,7 @@ impl GameState {
 			_ => Duration::from_millis(17)
 		}
 	}
+
 	fn level(&self) -> u8 {
 		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
 	}
@@ -428,11 +470,11 @@ fn on_programm_exit(out: &mut Stdout) -> UniversalProcedureResult {
 const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
 const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 
-const FPS_LIMIT: u16 = 10;
+const FPS_LIMIT: u16 = 120;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 // Время на 1 кадр ↑
 
-
+// Решил использовать AtomicBool чтобы не писать unsafe, а так тут это не имеет значения
 static IS_RUNNING: AtomicBool = AtomicBool::new(true);
 pub fn exit_from_game() {
 	IS_RUNNING.store(false, Ordering::Release);
@@ -442,7 +484,7 @@ fn is_running() -> bool {
 }
 
 fn main() -> UniversalProcedureResult {
-	let mut state = GameState::new(5);
+	let mut state = GameState::new(0);
 
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
