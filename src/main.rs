@@ -1,7 +1,7 @@
 use std::cmp::{min};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Stdout, stdout};
 use std::iter;
 
@@ -75,7 +75,7 @@ impl UIElement for Vec<String> {
 	}
 }
 
-fn collect_last_released_keys() -> UniversalResult<Vec<KeyCode>>{
+fn collect_last_released_keys() -> DynResult<Vec<KeyCode>>{
 	let mut events_buffer: VecDeque<event::KeyEvent> = VecDeque::new();
 
 	while poll(Duration::from_millis(0))? {
@@ -98,6 +98,19 @@ struct FrameUpdateData {
 	frame_start_time: Instant,
 }
 
+enum InputAction {
+	MoveLeft,
+	ModeRight,
+	MoveDown,
+	Drop,
+	RotateCounterClockwise,
+	RotateClockwise,
+	TogglePause,
+	Exit,
+
+	DoNothing, // Заглушка
+}
+
 struct GameState {
 	current_figure: &'static Figure,
 	current_figure_position: Position<u8>,
@@ -109,6 +122,8 @@ struct GameState {
 	start_level: u8,
 	lines_hit: u16, // Не увеличивать, если ур. = 29 чтобы избежать переполнения
 	score: u64,
+
+	is_paused: bool,
 
 	last_figure_lowering_time: Instant,
 	start_time: Instant,
@@ -130,44 +145,69 @@ impl GameState {
 			lines_hit: 0,
 			score: 0,
 
+			is_paused: false,
+
 			last_figure_lowering_time: Instant::now(),
 			start_time: Instant::now(),
 		}
 	}
 
-	pub fn update(&mut self, data: &FrameUpdateData) -> UniversalProcedureResult {
-		let last_released_keys = collect_last_released_keys()?;
+	fn key_code_to_action(key_code: &KeyCode) -> InputAction {
+		match key_code {
+			KeyCode::Esc => InputAction::Exit,
+			KeyCode::Char('p') |
+			KeyCode::Char('з') => InputAction::TogglePause,
 
+			KeyCode::Char('a') | KeyCode::Char('ф') |
+			KeyCode::Left => InputAction::MoveLeft,
+
+			KeyCode::Char('d') | KeyCode::Char('в') |
+			KeyCode::Right => InputAction::ModeRight,
+
+			KeyCode::Char('s') | KeyCode::Char('ы') |
+			KeyCode::Down => InputAction::MoveDown,
+
+			KeyCode::Char(' ') => InputAction::Drop,
+
+			KeyCode::Char('q') |
+			KeyCode::Char('й') => InputAction::RotateCounterClockwise,
+
+			KeyCode::Char('e') | KeyCode::Char('у') |
+			KeyCode::Up => InputAction::RotateClockwise,
+
+			_ => InputAction::DoNothing,
+		}
+	}
+
+	pub fn update(&mut self, data: &FrameUpdateData) -> DynProcedureResult {
+		// Должен ли работать таймер при паузе?
+		// Думаю нет, значит нужно что-то с ним придумать
+		if self.is_paused {
+			return Ok(());
+		}
+
+		// Обработка ввода //
+		let last_released_keys = collect_last_released_keys()?;
 		if !last_released_keys.is_empty() {
 			for key_code in last_released_keys.iter() {
-				match key_code {
-					KeyCode::Esc => {
+				match Self::key_code_to_action(key_code) {
+					InputAction::Exit => {
 						exit_from_game();
 						return Ok(());
 					}
-					KeyCode::Down => {
-						if self.current_figure_position.y < u8::MAX {
-							self.current_figure_position.y += 1;
-							self.last_figure_lowering_time = data.frame_start_time;
-						}
-						self.score = self.current_figure_position.y as u64;
+					InputAction::TogglePause => {
+						self.toggle_pause();
 					}
-					KeyCode::Left => {
-						if self.current_figure_position.x > u8::MIN {
-							self.current_figure_position.x -= 1;
-						}
-						self.score = self.current_figure_position.x as u64;
+					InputAction::MoveDown => {
+						self.last_figure_lowering_time = data.frame_start_time;
 					}
-					KeyCode::Right => {
-						if self.current_figure_position.x < (self.board.size.width + self.current_figure.size.width) as u8 {
-							self.current_figure_position.x += 1;
-						}
-						self.score = self.current_figure_position.x as u64;
-					}
-					KeyCode::Char('q') => {
+					InputAction::Drop => { }
+					InputAction::MoveLeft => { }
+					InputAction::ModeRight => { }
+					InputAction::RotateCounterClockwise => {
 						self.rotate_current_figure(false);
 					}
-					KeyCode::Char('e') => {
+					InputAction::RotateClockwise => {
 						self.rotate_current_figure(true);
 					}
 					_ => ()
@@ -175,17 +215,35 @@ impl GameState {
 			}
 		}
 
-		// Опускание фигуры
-		self.lower_current_figure_if_should(data);
+		// Опускание фигуры //
+		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
+			self.current_figure_position.y += 1;
+
+			// Для отладки!!!!
+			if self.current_figure_position.y > (self.board.size.height + self.current_figure.size.height) as u8 {
+				self.current_figure_position.y = 0;
+			}
+
+			self.last_figure_lowering_time = data.frame_start_time;
+		}
 
 		Ok(())
 	}
 
-	// Если добавлять другие состояния по типу этого (с методами update & update_gui)
-	// То преобразовать результат этой функции в Vec<String> и написать специальный GUIDrawler
-	// Который будет выполнять всю общую логику
-	// Если такой конечно будет, а то сейчас чуть переделал и его почти не осталось
-	pub fn update_gui(&self) -> UniversalProcedureResult {
+	// TODO: Заменить на render_gui(&self) -> Vec<String> и выводить на экран отдельно
+	/*
+УРОВЕНЬ: 9999    <! . . . . . . . . .!>  ВПРАВО:    [→ / D]
+ВРЕМЯ:   999:59  <! .[][][] . . . . .!>  ВЛЕВО:     [← / A]
+СЧЁТ:    170     <! . . .[] . . . . .!>  ВНИЗ:      [↓ / S]
+                 <! . . . . . . . . .!>  ОПУСТИТЬ:  [SPACE]
+     [][][]      <! . . . .[] . . . .!>  ПОВЕРНУТЬ: [Q] & [E / ↑]
+     []          <! . . . .[][][] . .!>
+                 <![]::::::[][] . .[]!>
+                 <![][][]::[][][][][]!>  ПАУЗА: [P]
+                 <!==================!>  ВЫЙТИ: [ESC]
+                   \/\/\/\/\/\/\/\/\/
+	*/
+	pub fn update_gui(&self) -> DynProcedureResult {
 		const EMPTY_CELL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
 		const BOARD_EMPTY_CELL:	Pixel = [' ', '.'];
@@ -305,10 +363,12 @@ impl GameState {
 
 		let mut out: Stdout = stdout();
 		for pair in statistics_part.iter().zip_longest(&board_part) {
+			use EitherOrBoth::*;
+
 			let stat_and_board_lines: (&str, &str) = match pair {
-				EitherOrBoth::Both(stat, board) => (stat, board),
-				EitherOrBoth::Left(stat) => (stat, ""),
-				EitherOrBoth::Right(board) => ("", board),
+				Both(stat, board) => (stat, board),
+				Left(stat) => (stat, ""),
+				Right(board) => ("", board),
 			};
 
 			out.execute(Print(format!(
@@ -319,6 +379,11 @@ impl GameState {
 		}
 
 		Ok(())
+	}
+
+
+	fn toggle_pause(&mut self) {
+		self.is_paused = !self.is_paused;
 	}
 
 	fn rotate_current_figure(&mut self, clockwise: bool) {
@@ -333,19 +398,6 @@ impl GameState {
 			(North, true) => West,
 			(West, false) => North,
 			(West, true) => South,
-		}
-	}
-
-	fn lower_current_figure_if_should(&mut self, data: &FrameUpdateData) {
-		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
-			self.current_figure_position.y += 1;
-
-			// Для отладки!!!!
-			if self.current_figure_position.y > (self.board.size.height + self.current_figure.size.height) as u8 {
-				self.current_figure_position.y = 0;
-			}
-
-			self.last_figure_lowering_time = data.frame_start_time;
 		}
 	}
 
@@ -445,10 +497,10 @@ impl Figure {
 }
 
 
-type UniversalResult<T> = Result<T, Box<dyn std::error::Error>>;
-type UniversalProcedureResult = UniversalResult<()>;
+type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
+type DynProcedureResult = DynResult<()>;
 
-fn on_programm_enter(out: &mut Stdout) -> UniversalProcedureResult {
+fn on_programm_enter(out: &mut Stdout) -> DynProcedureResult {
 	terminal::enable_raw_mode()?;
 	out.execute(SetColors(Colors::new(FOREGROUND_COLOR, BACKGROUND_COLOR)))?;
 	out.execute(SetAttribute(Attribute::Bold))?;
@@ -456,11 +508,9 @@ fn on_programm_enter(out: &mut Stdout) -> UniversalProcedureResult {
 	out.execute(cursor::Hide)?;
 	Ok(())
 }
-fn on_programm_exit(out: &mut Stdout) -> UniversalProcedureResult {
-	out.execute(MoveTo(0, 0))?;
+fn on_programm_exit(out: &mut Stdout) -> DynProcedureResult {
 	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
-	out.execute(Clear(ClearType::All))?;
 	out.execute(cursor::Show)?;
 	terminal::disable_raw_mode()?;
 	Ok(())
@@ -483,12 +533,11 @@ fn is_running() -> bool {
 	IS_RUNNING.load(Ordering::Acquire)
 }
 
-fn main() -> UniversalProcedureResult {
-	let mut state = GameState::new(0);
-
+fn main() -> DynProcedureResult {
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
+	let mut state = GameState::new(0);
 	while is_running() {
 		let frame_start_time = Instant::now();
 
@@ -501,7 +550,7 @@ fn main() -> UniversalProcedureResult {
 			std::thread::sleep(FRAME_DURATION - frame_time);
 		}
 	}
-	on_programm_exit(&mut out)?;
 
+	on_programm_exit(&mut out)?;
 	Ok(())
 }
