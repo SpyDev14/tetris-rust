@@ -56,6 +56,132 @@ impl Board {
 	pub fn new(size: Size) -> Self {
 		Self {size, cells: bitvec![0; size.area()] }
 	}
+
+	fn get_cell(&self, x: usize, y: usize) -> bool {
+		if x >= self.size.width || y >= self.size.height {
+			return true; // Выход за границы считается коллизией
+		}
+		let index = y * self.size.width + x;
+		self.cells[index]
+	}
+
+	fn set_cell(&mut self, x: usize, y: usize, value: bool) {
+		if x < self.size.width && y < self.size.height {
+			let index = y * self.size.width + x;
+			self.cells.set(index, value);
+		}
+	}
+
+	// Проверяет, может ли фигура быть размещена в данной позиции
+	pub fn can_place_figure(&self, figure: &Figure, pos: Position<u8>) -> bool {
+		self.can_place_figure_with_size(figure.size, |row, col| {
+			let figure_index = row * figure.size.width + col;
+			figure.cells[figure_index]
+		}, pos)
+	}
+
+	// Проверяет, может ли фигура быть размещена в данной позиции с произвольным размером и функцией получения клеток
+	fn can_place_figure_with_size<F>(&self, figure_size: Size, get_cell: F, pos: Position<u8>) -> bool
+	where
+		F: Fn(usize, usize) -> bool,
+	{
+		let pos_x = pos.x as usize;
+		let pos_y = pos.y as usize;
+
+		for row in 0..figure_size.height {
+			for col in 0..figure_size.width {
+				if get_cell(row, col) {
+					let board_x = pos_x + col;
+					let board_y = pos_y + row;
+
+					if board_x >= self.size.width || board_y >= self.size.height {
+						return false;
+					}
+
+					if self.get_cell(board_x, board_y) {
+						return false;
+					}
+				}
+			}
+		}
+		true
+	}
+
+	// Размещает фигуру на доске
+	pub fn place_figure(&mut self, figure: &Figure, pos: Position<u8>) {
+		self.place_figure_with_size(figure.size, |row, col| {
+			let figure_index = row * figure.size.width + col;
+			figure.cells[figure_index]
+		}, pos)
+	}
+
+	// Размещает фигуру на доске с произвольным размером и функцией получения клеток
+	fn place_figure_with_size<F>(&mut self, figure_size: Size, get_cell: F, pos: Position<u8>)
+	where
+		F: Fn(usize, usize) -> bool,
+	{
+		let pos_x = pos.x as usize;
+		let pos_y = pos.y as usize;
+
+		for row in 0..figure_size.height {
+			for col in 0..figure_size.width {
+				if get_cell(row, col) {
+					let board_x = pos_x + col;
+					let board_y = pos_y + row;
+					self.set_cell(board_x, board_y, true);
+				}
+			}
+		}
+	}
+
+	// Проверяет и очищает заполненные линии, возвращает количество очищенных линий
+	pub fn clear_full_lines(&mut self) -> usize {
+		let mut lines_to_clear = Vec::new();
+
+		// Находим заполненные линии
+		for row in 0..self.size.height {
+			let mut is_full = true;
+			for col in 0..self.size.width {
+				if !self.get_cell(col, row) {
+					is_full = false;
+					break;
+				}
+			}
+			if is_full {
+				lines_to_clear.push(row);
+			}
+		}
+
+		if lines_to_clear.is_empty() {
+			return 0;
+		}
+
+		// Используем алгоритм "двух указателей" для правильного удаления всех линий за один проход
+		// read_row идет сверху вниз, write_row указывает куда копировать незаполненные линии
+		let mut write_row = 0;
+		for read_row in 0..self.size.height {
+			// Если эта линия не должна быть удалена, копируем её
+			if !lines_to_clear.contains(&read_row) {
+				if write_row != read_row {
+					// Копируем линию read_row в позицию write_row
+					for col in 0..self.size.width {
+						let value = self.get_cell(col, read_row);
+						self.set_cell(col, write_row, value);
+					}
+				}
+				write_row += 1;
+			}
+		}
+
+		// Очищаем оставшиеся линии сверху (они уже были скопированы или пустые)
+		for row in write_row..self.size.height {
+			for col in 0..self.size.width {
+				self.set_cell(col, row, false);
+			}
+		}
+
+		lines_to_clear.len()
+	}
 }
 
 type Pixel = [char; 2];
@@ -146,23 +272,35 @@ impl GameState {
 						return Ok(());
 					}
 					KeyCode::Down => {
-						if self.current_figure_position.y < u8::MAX {
-							self.current_figure_position.y += 1;
+						let new_position = Position {
+							x: self.current_figure_position.x,
+							y: self.current_figure_position.y + 1,
+						};
+						if self.can_place_rotated_figure(self.current_figure, self.current_figure_rotation, new_position) {
+							self.current_figure_position = new_position;
 							self.last_figure_lowering_time = data.frame_start_time;
+						} else {
+							// Если не может двигаться вниз, замораживаем фигуру
+							self.freeze_current_figure();
 						}
-						self.score = self.current_figure_position.y as u64;
 					}
 					KeyCode::Left => {
-						if self.current_figure_position.x > u8::MIN {
-							self.current_figure_position.x -= 1;
+						let new_position = Position {
+							x: self.current_figure_position.x.saturating_sub(1),
+							y: self.current_figure_position.y,
+						};
+						if self.can_place_rotated_figure(self.current_figure, self.current_figure_rotation, new_position) {
+							self.current_figure_position = new_position;
 						}
-						self.score = self.current_figure_position.x as u64;
 					}
 					KeyCode::Right => {
-						if self.current_figure_position.x < (self.board.size.width + self.current_figure.size.width) as u8 {
-							self.current_figure_position.x += 1;
+						let new_position = Position {
+							x: self.current_figure_position.x.saturating_add(1),
+							y: self.current_figure_position.y,
+						};
+						if self.can_place_rotated_figure(self.current_figure, self.current_figure_rotation, new_position) {
+							self.current_figure_position = new_position;
 						}
-						self.score = self.current_figure_position.x as u64;
 					}
 					KeyCode::Char('q') => {
 						self.rotate_current_figure(false);
@@ -181,10 +319,7 @@ impl GameState {
 		Ok(())
 	}
 
-	// Если добавлять другие состояния по типу этого (с методами update & update_gui)
-	// То преобразовать результат этой функции в Vec<String> и написать специальный GUIDrawler
-	// Который будет выполнять всю общую логику
-	// Если такой конечно будет, а то сейчас чуть переделал и его почти не осталось
+	// TODO: Заменить на render_gui(&self) -> Vec<String> и выводить на экран отдельно
 	pub fn update_gui(&self) -> UniversalProcedureResult {
 		const EMPTY_CELL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
@@ -262,16 +397,32 @@ impl GameState {
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
 			let board_width = self.board.size.width;
+			let figure = self.current_figure;
+			let figure_pos = self.current_figure_position;
+			let rotation = self.current_figure_rotation;
+			let rotated_size = self.rotated_figure_size(figure, rotation);
 
 			for row in 0..self.board.size.height {
 				let start_index = row * board_width;
-				//
 				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
 					iter::once(LEFT_BORDER)
-					.chain(cells_row.iter().map(|cell| {
-						if *cell {FIGURE_CELL} else {BOARD_EMPTY_CELL}
+					.chain(cells_row.iter().enumerate().map(|(col, cell)| {
+						// Проверяем, находится ли эта клетка в области текущей фигуры
+						let fig_row = row as i16 - figure_pos.y as i16;
+						let fig_col = col as i16 - figure_pos.x as i16;
+
+						let is_figure_cell =
+							fig_row >= 0 && fig_row < rotated_size.height as i16 &&
+							fig_col >= 0 && fig_col < rotated_size.width as i16 &&
+							self.rotated_figure_cell(figure, rotation, fig_row as usize, fig_col as usize);
+
+						if *cell || is_figure_cell {
+							FIGURE_CELL
+						} else {
+							BOARD_EMPTY_CELL
+						}
 					}))
 					.chain(iter::once(RIGHT_BORDER))
 					.flatten()
@@ -324,7 +475,7 @@ impl GameState {
 	fn rotate_current_figure(&mut self, clockwise: bool) {
 		use Direction::*;
 
-		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
+		let new_rotation = match (self.current_figure_rotation, clockwise) {
 			(South, false) => West,
 			(South, true) => East,
 			(East, false) => South,
@@ -333,19 +484,68 @@ impl GameState {
 			(North, true) => West,
 			(West, false) => North,
 			(West, true) => South,
+		};
+
+		// Проверяем, можно ли повернуть фигуру в новую позицию
+		if self.can_place_rotated_figure(self.current_figure, new_rotation, self.current_figure_position) {
+			self.current_figure_rotation = new_rotation;
+		}
+	}
+
+	fn spawn_new_figure(&mut self) {
+		let mut rng = rng();
+
+		self.current_figure = self.next_figure;
+		self.current_figure_position = Position {
+			x: (self.board.size.width / 2) as u8,
+			y: 0
+		};
+		self.current_figure_rotation = Direction::South;
+		self.next_figure = Figure::choose_random(&mut rng);
+		self.last_figure_lowering_time = Instant::now();
+	}
+
+	fn freeze_current_figure(&mut self) {
+		self.place_rotated_figure(self.current_figure, self.current_figure_rotation, self.current_figure_position);
+
+		// Очищаем заполненные линии
+		let cleared_lines = self.board.clear_full_lines();
+		if cleared_lines > 0 {
+			self.lines_hit = self.lines_hit.saturating_add(cleared_lines as u16);
+			// Подсчет очков: базовая формула (можно улучшить)
+			let level = self.level();
+			self.score += match cleared_lines {
+				1 => 40 * (level as u64 + 1),
+				2 => 100 * (level as u64 + 1),
+				3 => 300 * (level as u64 + 1),
+				4 => 1200 * (level as u64 + 1),
+				_ => 0,
+			};
+		}
+
+		// Спавним новую фигуру
+		self.spawn_new_figure();
+
+		// Проверяем game over: если новая фигура не может быть размещена на стартовой позиции
+		if !self.can_place_rotated_figure(self.current_figure, self.current_figure_rotation, self.current_figure_position) {
+			exit_from_game();
 		}
 	}
 
 	fn lower_current_figure_if_should(&mut self, data: &FrameUpdateData) {
 		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
-			self.current_figure_position.y += 1;
+			let new_position = Position {
+				x: self.current_figure_position.x,
+				y: self.current_figure_position.y + 1,
+			};
 
-			// Для отладки!!!!
-			if self.current_figure_position.y > (self.board.size.height + self.current_figure.size.height) as u8 {
-				self.current_figure_position.y = 0;
+			if self.can_place_rotated_figure(self.current_figure, self.current_figure_rotation, new_position) {
+				self.current_figure_position = new_position;
+				self.last_figure_lowering_time = data.frame_start_time;
+			} else {
+				// Фигура не может двигаться вниз - замораживаем её
+				self.freeze_current_figure();
 			}
-
-			self.last_figure_lowering_time = data.frame_start_time;
 		}
 	}
 
@@ -368,6 +568,75 @@ impl GameState {
 
 	fn level(&self) -> u8 {
 		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
+	}
+
+	// Получает размер фигуры с учетом поворота
+	fn rotated_figure_size(&self, figure: &Figure, direction: Direction) -> Size {
+		use Direction::*;
+		match direction {
+			South | North => figure.size,
+			East | West => Size {
+				height: figure.size.width,
+				width: figure.size.height,
+			},
+		}
+	}
+
+	// Проверяет, занята ли клетка в фигуре с учетом поворота
+	// row и col - координаты в повернутой фигуре
+	fn rotated_figure_cell(&self, figure: &Figure, direction: Direction, row: usize, col: usize) -> bool {
+		use Direction::*;
+		let (orig_row, orig_col) = match direction {
+			South => (row, col),
+			East => (figure.size.height - 1 - col, row),
+			North => (figure.size.height - 1 - row, figure.size.width - 1 - col),
+			West => (col, figure.size.width - 1 - row),
+		};
+
+		if orig_row >= figure.size.height || orig_col >= figure.size.width {
+			return false;
+		}
+
+		let index = orig_row * figure.size.width + orig_col;
+		figure.cells[index]
+	}
+
+	// Проверяет, может ли повернутая фигура быть размещена в данной позиции
+	fn can_place_rotated_figure(&self, figure: &Figure, direction: Direction, pos: Position<u8>) -> bool {
+		let rotated_size = self.rotated_figure_size(figure, direction);
+		// Создаем временный буфер с клетками повернутой фигуры
+		let mut rotated_cells = bitvec![0; rotated_size.area()];
+		for row in 0..rotated_size.height {
+			for col in 0..rotated_size.width {
+				if self.rotated_figure_cell(figure, direction, row, col) {
+					let index = row * rotated_size.width + col;
+					rotated_cells.set(index, true);
+				}
+			}
+		}
+		self.board.can_place_figure_with_size(rotated_size, |row, col| {
+			let index = row * rotated_size.width + col;
+			rotated_cells[index]
+		}, pos)
+	}
+
+	// Размещает повернутую фигуру на доске
+	fn place_rotated_figure(&mut self, figure: &Figure, direction: Direction, pos: Position<u8>) {
+		let rotated_size = self.rotated_figure_size(figure, direction);
+		// Создаем временный буфер с клетками повернутой фигуры
+		let mut rotated_cells = bitvec![0; rotated_size.area()];
+		for row in 0..rotated_size.height {
+			for col in 0..rotated_size.width {
+				if self.rotated_figure_cell(figure, direction, row, col) {
+					let index = row * rotated_size.width + col;
+					rotated_cells.set(index, true);
+				}
+			}
+		}
+		self.board.place_figure_with_size(rotated_size, |row, col| {
+			let index = row * rotated_size.width + col;
+			rotated_cells[index]
+		}, pos)
 	}
 }
 
@@ -457,10 +726,8 @@ fn on_programm_enter(out: &mut Stdout) -> UniversalProcedureResult {
 	Ok(())
 }
 fn on_programm_exit(out: &mut Stdout) -> UniversalProcedureResult {
-	out.execute(MoveTo(0, 0))?;
 	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
-	out.execute(Clear(ClearType::All))?;
 	out.execute(cursor::Show)?;
 	terminal::disable_raw_mode()?;
 	Ok(())
@@ -501,7 +768,7 @@ fn main() -> UniversalProcedureResult {
 			std::thread::sleep(FRAME_DURATION - frame_time);
 		}
 	}
-	on_programm_exit(&mut out)?;
 
+	on_programm_exit(&mut out)?;
 	Ok(())
 }
