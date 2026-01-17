@@ -1,7 +1,7 @@
 use std::cmp::{min};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{VecDeque};
 use std::io::{Stdout, stdout};
 use std::iter;
 
@@ -18,7 +18,7 @@ use crossterm::{
 	style::{
 		Print,
 		Color,
-		SetColors,
+		SetColors, SetForegroundColor,
 		Colors,
 		ResetColor,
 		SetAttribute,
@@ -59,9 +59,21 @@ impl Board {
 }
 
 type Pixel = [char; 2];
+trait PixelLength {
+	const PX_LENGTH: usize;
+}
+impl PixelLength for [char; 2] {
+	const PX_LENGTH: usize = 2;
+}
 
 // Хз какое название дать :/
 // Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
+
+// TODO: Написать специальный UIComposer с методами настройки выравнивания, отступов и т.д
+/*
+	- with_alignment(alignment) -> self
+	- compile() -> Vec<String>
+*/
 trait UIElement {
 	fn required_width(&self) -> usize;
 }
@@ -96,9 +108,11 @@ fn collect_last_released_keys() -> DynResult<Vec<KeyCode>>{
 
 struct FrameUpdateData {
 	frame_start_time: Instant,
+	// Ранее здесь также была delta time
 }
 
-enum InputAction {
+#[derive(PartialEq)]
+enum PlayerAction {
 	MoveLeft,
 	ModeRight,
 	MoveDown,
@@ -109,6 +123,37 @@ enum InputAction {
 	Exit,
 
 	DoNothing, // Заглушка
+}
+trait ToPlayerAction {
+	fn to_player_action(&self) -> PlayerAction;
+}
+impl ToPlayerAction for KeyCode {
+	fn to_player_action(&self) -> PlayerAction {
+		match self {
+			KeyCode::Esc => PlayerAction::Exit,
+			KeyCode::Char('p') |
+			KeyCode::Char('з') => PlayerAction::TogglePause,
+
+			KeyCode::Char('a') | KeyCode::Char('ф') |
+			KeyCode::Left => PlayerAction::MoveLeft,
+
+			KeyCode::Char('d') | KeyCode::Char('в') |
+			KeyCode::Right => PlayerAction::ModeRight,
+
+			KeyCode::Char('s') | KeyCode::Char('ы') |
+			KeyCode::Down => PlayerAction::MoveDown,
+
+			KeyCode::Char(' ') => PlayerAction::Drop,
+
+			KeyCode::Char('q') |
+			KeyCode::Char('й') => PlayerAction::RotateCounterClockwise,
+
+			KeyCode::Char('e') | KeyCode::Char('у') |
+			KeyCode::Up => PlayerAction::RotateClockwise,
+
+			_ => PlayerAction::DoNothing,
+		}
+	}
 }
 
 struct GameState {
@@ -152,62 +197,39 @@ impl GameState {
 		}
 	}
 
-	fn key_code_to_action(key_code: &KeyCode) -> InputAction {
-		match key_code {
-			KeyCode::Esc => InputAction::Exit,
-			KeyCode::Char('p') |
-			KeyCode::Char('з') => InputAction::TogglePause,
-
-			KeyCode::Char('a') | KeyCode::Char('ф') |
-			KeyCode::Left => InputAction::MoveLeft,
-
-			KeyCode::Char('d') | KeyCode::Char('в') |
-			KeyCode::Right => InputAction::ModeRight,
-
-			KeyCode::Char('s') | KeyCode::Char('ы') |
-			KeyCode::Down => InputAction::MoveDown,
-
-			KeyCode::Char(' ') => InputAction::Drop,
-
-			KeyCode::Char('q') |
-			KeyCode::Char('й') => InputAction::RotateCounterClockwise,
-
-			KeyCode::Char('e') | KeyCode::Char('у') |
-			KeyCode::Up => InputAction::RotateClockwise,
-
-			_ => InputAction::DoNothing,
-		}
-	}
-
 	pub fn update(&mut self, data: &FrameUpdateData) -> DynProcedureResult {
-		// Должен ли работать таймер при паузе?
-		// Думаю нет, значит нужно что-то с ним придумать
-		if self.is_paused {
-			return Ok(());
-		}
 
 		// Обработка ввода //
 		let last_released_keys = collect_last_released_keys()?;
 		if !last_released_keys.is_empty() {
 			for key_code in last_released_keys.iter() {
-				match Self::key_code_to_action(key_code) {
-					InputAction::Exit => {
+				use PlayerAction::*;
+				let action = key_code.to_player_action();
+
+				// Должен ли работать таймер при паузе?
+				// Думаю нет, значит нужно что-то с ним придумать
+				if !(!self.is_paused || action == TogglePause || action == Exit) {
+					return Ok(());
+				}
+
+				match key_code.to_player_action() {
+					Exit => {
 						exit_from_game();
 						return Ok(());
 					}
-					InputAction::TogglePause => {
+					TogglePause => {
 						self.toggle_pause();
 					}
-					InputAction::MoveDown => {
+					MoveDown => {
 						self.last_figure_lowering_time = data.frame_start_time;
 					}
-					InputAction::Drop => { }
-					InputAction::MoveLeft => { }
-					InputAction::ModeRight => { }
-					InputAction::RotateCounterClockwise => {
+					Drop => { }
+					MoveLeft => { }
+					ModeRight => { }
+					RotateCounterClockwise => {
 						self.rotate_current_figure(false);
 					}
-					InputAction::RotateClockwise => {
+					RotateClockwise => {
 						self.rotate_current_figure(true);
 					}
 					_ => ()
@@ -216,13 +238,10 @@ impl GameState {
 		}
 
 		// Опускание фигуры //
-		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
-			self.current_figure_position.y += 1;
-
-			// Для отладки!!!!
-			if self.current_figure_position.y > (self.board.size.height + self.current_figure.size.height) as u8 {
-				self.current_figure_position.y = 0;
-			}
+		if data.frame_start_time.duration_since(
+			self.last_figure_lowering_time
+		) > self.figure_lowering_duration() {
+			// self.current_figure_position.y += 1;
 
 			self.last_figure_lowering_time = data.frame_start_time;
 		}
@@ -230,7 +249,6 @@ impl GameState {
 		Ok(())
 	}
 
-	// TODO: Заменить на render_gui(&self) -> Vec<String> и выводить на экран отдельно
 	/*
 УРОВЕНЬ: 9999    <! . . . . . . . . .!>  ВПРАВО:    [→ / D]
 ВРЕМЯ:   999:59  <! .[][][] . . . . .!>  ВЛЕВО:     [← / A]
@@ -243,7 +261,7 @@ impl GameState {
                  <!==================!>  ВЫЙТИ: [ESC]
                    \/\/\/\/\/\/\/\/\/
 	*/
-	pub fn update_gui(&self) -> DynProcedureResult {
+	pub fn render_frame(&self) -> Vec<String> {
 		const EMPTY_CELL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
 		const BOARD_EMPTY_CELL:	Pixel = [' ', '.'];
@@ -253,6 +271,10 @@ impl GameState {
 		const BOTTOM_CLOSING:	Pixel = ['\\','/'];
 		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = EMPTY_CELL;
 		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = EMPTY_CELL;
+
+		const PAUSE_LABEL_FILLER: char = '=';
+		const PAUSE_LABEL_OPENING: char = '[';
+		const PAUSE_LABEL_CLOSING: char = ']';
 
 		const GAP_BETWEEN_PARTS: usize = 2;
 		let str_gap = String::from_iter(
@@ -320,6 +342,7 @@ impl GameState {
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
 			let board_width = self.board.size.width;
+			let pause_label_row = self.board.size.height / 2;
 
 			for row in 0..self.board.size.height {
 				let start_index = row * board_width;
@@ -327,13 +350,30 @@ impl GameState {
 				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
-					iter::once(LEFT_BORDER)
-					.chain(cells_row.iter().map(|cell| {
-						if *cell {FIGURE_CELL} else {BOARD_EMPTY_CELL}
-					}))
-					.chain(iter::once(RIGHT_BORDER))
-					.flatten()
-					.collect::<String>()
+					if self.is_paused && row == pause_label_row {
+						let mut line = String::new();
+						line.push(LEFT_BORDER[0]);
+						line.push(LEFT_BORDER[1]);
+
+						let width = board_width * Pixel::PX_LENGTH;
+						line.push_str(
+							format!( "{:*^width$}", format!("{}ПАУЗА{}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING)
+							).replace("*", PAUSE_LABEL_FILLER.to_string().as_str()).as_str()
+						);
+
+						line.push(RIGHT_BORDER[0]);
+						line.push(RIGHT_BORDER[1]);
+
+						line
+					} else {
+						iter::once(LEFT_BORDER)
+						.chain(cells_row.iter().map(|cell| {
+							if *cell {FIGURE_CELL} else {BOARD_EMPTY_CELL}
+						}))
+						.chain(iter::once(RIGHT_BORDER))
+						.flatten()
+						.collect::<String>()
+					}
 				);
 			}
 
@@ -361,7 +401,7 @@ impl GameState {
 		let stat_part_width = statistics_part.required_width();
 		let board_part_width = board_part.required_width();
 
-		let mut out: Stdout = stdout();
+		let mut rendered_lines: Vec<String> = vec![];
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			use EitherOrBoth::*;
 
@@ -371,17 +411,16 @@ impl GameState {
 				Right(board) => ("", board),
 			};
 
-			out.execute(Print(format!(
+			rendered_lines.push(format!(
 				"{:<stat_part_width$}{str_gap}{:<board_part_width$}",
-				stat_and_board_lines.0, stat_and_board_lines.1,
-			)))?;
-			out.execute(MoveToNextLine(1))?;
+				stat_and_board_lines.0, stat_and_board_lines.1,)
+			);
 		}
 
-		Ok(())
+		rendered_lines
 	}
 
-
+	// TODO: Добавить ограничение, чтобы поставить на паузу можно было только до N-тного уровня
 	fn toggle_pause(&mut self) {
 		self.is_paused = !self.is_paused;
 	}
@@ -496,6 +535,18 @@ impl Figure {
 	}
 }
 
+fn draw_frame(rendered_frame: &Vec<String>) -> DynProcedureResult {
+	let mut out: Stdout = stdout();
+	out.execute(MoveTo(0, 0))?;
+
+	for line in rendered_frame {
+		out.execute(Print(line))?;
+		out.execute(MoveToNextLine(1))?;
+	}
+
+	Ok(())
+}
+
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 type DynProcedureResult = DynResult<()>;
@@ -508,7 +559,11 @@ fn on_programm_enter(out: &mut Stdout) -> DynProcedureResult {
 	out.execute(cursor::Hide)?;
 	Ok(())
 }
-fn on_programm_exit(out: &mut Stdout) -> DynProcedureResult {
+fn on_programm_exit(out: &mut Stdout, last_rendered_frame: &Vec<String>) -> DynProcedureResult {
+	out.execute(ResetColor)?;
+	out.execute(Clear(ClearType::All))?;
+	out.execute(SetForegroundColor(FOREGROUND_COLOR))?;
+	draw_frame(last_rendered_frame)?;
 	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
 	out.execute(cursor::Show)?;
@@ -538,12 +593,13 @@ fn main() -> DynProcedureResult {
 	on_programm_enter(&mut out)?;
 
 	let mut state = GameState::new(0);
+	let mut last_rendered_frame: Vec<String> = vec![];
 	while is_running() {
 		let frame_start_time = Instant::now();
 
 		state.update(&FrameUpdateData { frame_start_time })?;
-		out.execute(MoveTo(0, 0))?;
-		state.update_gui()?;
+		last_rendered_frame = state.render_frame();
+		draw_frame(&last_rendered_frame)?;
 
 		let frame_time = frame_start_time.elapsed();
 		if frame_time < FRAME_DURATION {
@@ -551,6 +607,6 @@ fn main() -> DynProcedureResult {
 		}
 	}
 
-	on_programm_exit(&mut out)?;
+	on_programm_exit(&mut out, &last_rendered_frame)?;
 	Ok(())
 }
