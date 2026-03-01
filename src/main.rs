@@ -1,5 +1,4 @@
 use std::cmp::{min};
-use std::fmt::format;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::{VecDeque};
@@ -7,6 +6,7 @@ use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
+use crossterm::event::KeyEvent;
 use itertools::{EitherOrBoth, Itertools};
 use rand::{
 	rngs::ThreadRng,
@@ -33,7 +33,7 @@ use crossterm::{
 // -------------
 #[derive(Debug, Clone, Copy)]
 struct Position<T> {
-	x: T, y: T,
+	_x: T, _y: T,
 }
 
 #[derive(Clone, Copy)]
@@ -42,24 +42,71 @@ struct Size {
 	width: usize
 }
 impl Size {
-	pub fn area(&self) -> usize {
+	pub fn _area(&self) -> usize {
 		self.height * self.width
+	}
+}
+
+struct Stopwatch {
+	total: Duration,
+	start_time: Option<Instant>,
+}
+impl Stopwatch {
+	fn new() -> Self {
+		Self {
+			total: Duration::ZERO,
+			start_time: None,
+		}
+	}
+
+	fn start_new() -> Self {
+		let mut this: Stopwatch = Self::new();
+		this.start();
+
+		this
+	}
+
+	fn start(&mut self) {
+		if self.start_time.is_none() {
+			self.start_time = Some(Instant::now())
+		}
+	}
+
+	fn pause(&mut self) {
+		if let Some(start_time) = self.start_time {
+			self.total += start_time.elapsed();
+			self.start_time = None;
+		}
+	}
+
+	fn elapsed(&self) -> Duration {
+		if let Some(start_time) = self.start_time {
+			self.total + start_time.elapsed()
+		} else {
+			self.total
+		}
 	}
 }
 
 // -------------
 struct Board {
 	size: Size,
-	cells: BitVec,
+	rows: Vec<BitArray<[u16; 1]>>,
 }
 
 impl Board {
-	pub fn new(size: Size) -> Self {
-		Self {size, cells: bitvec![0; size.area()] }
+	const BOARD_SIZE: Size = Size { width: 10, height: 20 };
+
+	pub fn new() -> Self {
+		let rows = Vec::from_iter(
+			iter::repeat_n(BitArray::ZERO, Self::BOARD_SIZE.height)
+		);
+
+		Self {size: Self::BOARD_SIZE, rows }
 	}
 }
 
-type Pixel = [char; 2];
+type Pixel = [char; PIXEL_LENGTH];
 const PIXEL_LENGTH: usize = 2;
 
 // Хз какое название дать :/
@@ -83,7 +130,7 @@ impl UIElement for Vec<String> {
 	}
 }
 
-fn collect_last_released_keys() -> DynResult<Vec<KeyCode>>{
+fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
 	let mut events_buffer: VecDeque<event::KeyEvent> = VecDeque::new();
 
 	while poll(Duration::from_millis(0))? {
@@ -95,11 +142,7 @@ fn collect_last_released_keys() -> DynResult<Vec<KeyCode>>{
 		}
 	}
 
-	Ok(Vec::from_iter(
-		events_buffer.iter()
-			.filter(|event| event.is_release())
-			.map(|event| event.code)
-	))
+	Ok(Vec::from(events_buffer))
 }
 
 struct FrameUpdateData {
@@ -113,48 +156,39 @@ enum PlayerAction {
 	ModeRight,
 	MoveDown,
 	Drop,
-	RotateCounterClockwise,
 	RotateClockwise,
+	RotateCounterClockwise,
 	TogglePause,
 	Exit,
 
 	DoNothing, // Заглушка
 }
-trait ToPlayerAction {
-	fn to_player_action(&self) -> PlayerAction;
-}
-impl ToPlayerAction for KeyCode {
-	fn to_player_action(&self) -> PlayerAction {
-		match self {
-			KeyCode::Esc => PlayerAction::Exit,
-			KeyCode::Char('p') |
-			KeyCode::Char('з') => PlayerAction::TogglePause,
+impl PlayerAction {
+	pub fn from_key_event(event: KeyEvent) -> Self {
+		use KeyCode::*;
 
-			KeyCode::Char('a') | KeyCode::Char('ф') |
-			KeyCode::Left => PlayerAction::MoveLeft,
+		if event.is_release() {
+			match event.code {
+				Char('a') | Char('ф') | Left 	=> return PlayerAction::MoveLeft,
+				Char('d') | Char('в') | Right 	=> return PlayerAction::ModeRight,
+				Char('s') | Char('ы') | Down 	=> return PlayerAction::MoveDown,
+				Char(' ') 						=> return PlayerAction::Drop,
+				Char('w') | Char('ц') | Up 		=> return PlayerAction::RotateClockwise,
+				Char('e') | Char('у') 			=> return PlayerAction::RotateCounterClockwise,
+				Char('q') | Char('й') | Esc 	=> return PlayerAction::Exit,
+				Char('p') | Char('з') 			=> return PlayerAction::TogglePause,
 
-			KeyCode::Char('d') | KeyCode::Char('в') |
-			KeyCode::Right => PlayerAction::ModeRight,
-
-			KeyCode::Char('s') | KeyCode::Char('ы') |
-			KeyCode::Down => PlayerAction::MoveDown,
-
-			KeyCode::Char(' ') => PlayerAction::Drop,
-
-			KeyCode::Char('q') |
-			KeyCode::Char('й') => PlayerAction::RotateCounterClockwise,
-
-			KeyCode::Char('e') | KeyCode::Char('у') |
-			KeyCode::Up => PlayerAction::RotateClockwise,
-
-			_ => PlayerAction::DoNothing,
+				_ => {},
+			}
 		}
+
+		PlayerAction::DoNothing
 	}
 }
 
 struct GameState {
-	current_figure: &'static Figure,
-	current_figure_position: Position<u8>,
+	_current_figure: &'static Figure,
+	_current_figure_position: Position<u8>,
 	current_figure_rotation: Direction,
 
 	next_figure: &'static Figure,
@@ -167,16 +201,16 @@ struct GameState {
 	is_paused: bool,
 
 	last_figure_lowering_time: Instant,
-	start_time: Instant,
+	stopwatch: Stopwatch,
 }
 impl GameState {
 	pub fn new(start_level: u8) -> Self {
 		let mut rng = rng();
-		let board = Board::new(Size {height: 15, width: 10});
+		let board = Board::new();
 
 		Self {
-			current_figure: Figure::choose_random(&mut rng),
-			current_figure_position: Position { x: (board.size.width / 2) as u8, y: 0 },
+			_current_figure: Figure::choose_random(&mut rng),
+			_current_figure_position: Position { _x: (board.size.width / 2) as u8, _y: 0 },
 			current_figure_rotation: Direction::South,
 
 			next_figure: Figure::choose_random(&mut rng),
@@ -189,46 +223,39 @@ impl GameState {
 			is_paused: false,
 
 			last_figure_lowering_time: Instant::now(),
-			start_time: Instant::now(),
+			stopwatch: Stopwatch::start_new(),
 		}
 	}
 
-	pub fn update(&mut self, data: &FrameUpdateData) -> DynProcedureResult {
-
+	pub fn update(&mut self, data: &FrameUpdateData) -> std::io::Result<()> {
 		// Обработка ввода //
-		let last_released_keys = collect_last_released_keys()?;
+		let last_released_keys = collect_last_key_events()?;
 		if !last_released_keys.is_empty() {
-			for key_code in last_released_keys.iter() {
+			for key_event in last_released_keys.iter() {
 				use PlayerAction::*;
-				let action = key_code.to_player_action();
+				let action = PlayerAction::from_key_event(*key_event);
 
-				// Должен ли работать таймер при паузе?
-				// Думаю нет, значит нужно что-то с ним придумать
-				if PAUSING_FEATURE_ENABLED && !(!self.is_paused || action == TogglePause || action == Exit) {
-					return Ok(());
-				}
-
-				match key_code.to_player_action() {
+				match action {
 					Exit => {
 						exit_from_game();
 						return Ok(());
 					}
-					TogglePause => {
-						self.toggle_pause();
-					}
-					MoveDown => {
-						self.last_figure_lowering_time = data.frame_start_time;
-					}
+					TogglePause => self.toggle_pause(),
+					_ => {}
+				}
+
+				if self.is_paused {
+					return Ok(());
+				}
+
+				match action {
+					MoveDown => self.last_figure_lowering_time = data.frame_start_time,
 					Drop => { }
 					MoveLeft => { }
 					ModeRight => { }
-					RotateCounterClockwise => {
-						self.rotate_current_figure(false);
-					}
-					RotateClockwise => {
-						self.rotate_current_figure(true);
-					}
-					_ => ()
+					RotateCounterClockwise => self.rotate_current_figure(false),
+					RotateClockwise => self.rotate_current_figure(true),
+					_ => {}
 				}
 			}
 		}
@@ -252,15 +279,15 @@ impl GameState {
                  <! . . . . . . . . .!>  ОПУСТИТЬ:  [SPACE]
      [][][]      <! . . . .[] . . . .!>  ПОВЕРНУТЬ: [Q] & [E / ↑]
      []          <! . . . .[][][] . .!>
-                 <![]::::::[][] . .[]!>
-                 <![][][]::[][][][][]!>  ПАУЗА: [P]
+                 <![] * * *[][] . .[]!>
+                 <![][][] *[][][][][]!>  ПАУЗА: [P]
                  <!==================!>  ВЫЙТИ: [ESC]
                    \/\/\/\/\/\/\/\/\/
 	*/
 	pub fn render_frame(&self) -> Vec<String> {
 		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
-		const PREVIEW_CELL: 	Pixel = [' ', '*'];
+		const _PREVIEW_CELL: 	Pixel = [' ', '*'];
 		const EMPTY_CELL: 		Pixel = [' ', '.'];
 		const LEFT_BORDER: 		Pixel = ['<', '!'];
 		const RIGHT_BORDER: 	Pixel = ['!', '>'];
@@ -276,7 +303,7 @@ impl GameState {
 		const PAUSE_LABEL_CLOSING: char = ']';
 
 		let statistics_part: Vec<String> = (|| { // <- Анонимная функция!
-			let round_total_seconds = self.start_time.elapsed().as_secs();
+			let round_total_seconds = self.stopwatch.elapsed().as_secs();
 			let label_and_value = [
 				("УРОВЕНЬ:", self.level().to_string()),
 				("ВРЕМЯ:", 	format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
@@ -341,19 +368,18 @@ impl GameState {
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
 			let board_width = self.board.size.width;
-			let pause_label_row = self.board.size.height / 2;
+			let pause_label_row = (self.board.size.height / 2) - 1;
 
 			// Текущая фигура не должна отображаться при паузе
 
 			for row in 0..self.board.size.height {
-				let start_index = row * board_width;
-				let cells_row = &self.board.cells[start_index..start_index + board_width];
+				let cells_row = &self.board.rows[row];
 
 				lines.push(
 					if !(self.is_paused && row == pause_label_row) {
 						iter::once(LEFT_BORDER)
-						.chain(cells_row.iter().map(|cell| {
-							if *cell {FIGURE_CELL} else {EMPTY_CELL}
+						.chain(cells_row.iter().take(board_width).map(|cell| {
+							if *cell && !self.is_paused {FIGURE_CELL} else {EMPTY_CELL}
 						}))
 						.chain(iter::once(RIGHT_BORDER))
 						.flatten()
@@ -444,6 +470,11 @@ impl GameState {
 			return;
 		}
 		self.is_paused = !self.is_paused;
+
+		match self.is_paused {
+			false => self.stopwatch.start(),
+			true  => self.stopwatch.pause(),
+		}
 	}
 
 	fn rotate_current_figure(&mut self, clockwise: bool) {
@@ -569,7 +600,7 @@ impl Figure {
 	}
 }
 
-fn draw_frame(rendered_frame: &Vec<String>) -> DynProcedureResult {
+fn draw_frame(rendered_frame: &Vec<String>) -> std::io::Result<()> {
 	let mut out: Stdout = stdout();
 	out.execute(MoveTo(0, 0))?;
 
@@ -581,11 +612,7 @@ fn draw_frame(rendered_frame: &Vec<String>) -> DynProcedureResult {
 	Ok(())
 }
 
-
-type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
-type DynProcedureResult = DynResult<()>;
-
-fn on_programm_enter(out: &mut Stdout) -> DynProcedureResult {
+fn on_programm_enter(out: &mut Stdout) -> std::io::Result<()> {
 	terminal::enable_raw_mode()?;
 	out.execute(SetColors(Colors::new(FOREGROUND_COLOR, BACKGROUND_COLOR)))?;
 	out.execute(SetAttribute(Attribute::Bold))?;
@@ -593,18 +620,17 @@ fn on_programm_enter(out: &mut Stdout) -> DynProcedureResult {
 	out.execute(cursor::Hide)?;
 	Ok(())
 }
-fn on_programm_exit(out: &mut Stdout, last_rendered_frame: &Vec<String>) -> DynProcedureResult {
+fn on_programm_exit(out: &mut Stdout, rendered_frame: &Vec<String>) -> std::io::Result<()> {
 	out.execute(ResetColor)?;
 	out.execute(Clear(ClearType::All))?;
 	out.execute(SetForegroundColor(FOREGROUND_COLOR))?;
-	draw_frame(last_rendered_frame)?;
+	draw_frame(rendered_frame)?;
 	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
 	out.execute(cursor::Show)?;
 	terminal::disable_raw_mode()?;
 	Ok(())
 }
-
 
 const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
 const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
@@ -614,7 +640,7 @@ const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT 
 // Время на 1 кадр ↑
 
 // Дореализую позже
-const PAUSING_FEATURE_ENABLED: bool = false;
+const PAUSING_FEATURE_ENABLED: bool = true;
 
 // Решил использовать AtomicBool чтобы не писать unsafe, а так тут это не имеет значения
 static IS_RUNNING: AtomicBool = AtomicBool::new(true);
@@ -625,18 +651,18 @@ fn is_running() -> bool {
 	IS_RUNNING.load(Ordering::Acquire)
 }
 
-fn main() -> DynProcedureResult {
+fn main() -> std::io::Result<()> {
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
 	let mut state = GameState::new(0);
-	let mut last_rendered_frame: Vec<String> = vec![];
+	let mut rendered_frame: Vec<String> = vec![];
 	while is_running() {
 		let frame_start_time = Instant::now();
 
 		state.update(&FrameUpdateData { frame_start_time })?;
-		last_rendered_frame = state.render_frame();
-		draw_frame(&last_rendered_frame)?;
+		rendered_frame = state.render_frame();
+		draw_frame(&rendered_frame)?;
 
 		let frame_time = frame_start_time.elapsed();
 		if frame_time < FRAME_DURATION {
@@ -644,6 +670,6 @@ fn main() -> DynProcedureResult {
 		}
 	}
 
-	on_programm_exit(&mut out, &last_rendered_frame)?;
+	on_programm_exit(&mut out, &rendered_frame)?;
 	Ok(())
 }
