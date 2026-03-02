@@ -1,17 +1,17 @@
-use std::cmp::{min};
+use std::cmp::{max, min};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, KeyEventKind};
 use itertools::{EitherOrBoth, Itertools};
 use rand::{
 	rngs::ThreadRng,
-	seq::IndexedRandom,
-	rng,
+	seq::SliceRandom,
+	thread_rng,
 };
 
 use crossterm::{
@@ -19,9 +19,10 @@ use crossterm::{
 	style::{
 		Print,
 		Color,
-		SetColors, SetForegroundColor,
+		SetColors,
 		Colors,
 		ResetColor,
+		SetForegroundColor,
 		SetAttribute,
 		Attribute,
 	},
@@ -33,13 +34,14 @@ use crossterm::{
 // -------------
 #[derive(Debug, Clone, Copy)]
 struct Position<T> {
-	_x: T, _y: T,
+	x: T,
+	y: T,
 }
 
 #[derive(Clone, Copy)]
 struct Size {
 	height: usize,
-	width: usize
+	width: usize,
 }
 impl Size {
 	pub fn _area(&self) -> usize {
@@ -62,7 +64,6 @@ impl Stopwatch {
 	fn start_new() -> Self {
 		let mut this: Stopwatch = Self::new();
 		this.start();
-
 		this
 	}
 
@@ -101,22 +102,13 @@ impl Board {
 		let rows = Vec::from_iter(
 			iter::repeat_n(BitArray::ZERO, Self::BOARD_SIZE.height)
 		);
-
-		Self {size: Self::BOARD_SIZE, rows }
+		Self { size: Self::BOARD_SIZE, rows }
 	}
 }
 
 type Pixel = [char; PIXEL_LENGTH];
 const PIXEL_LENGTH: usize = 2;
 
-// Хз какое название дать :/
-// Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
-
-// TODO: Написать специальный UIComposer с методами настройки выравнивания, отступов и т.д
-/*
-	- with_alignment(alignment) -> self
-	- compile() -> Vec<String>
-*/
 trait UIElement {
 	fn required_width(&self) -> usize;
 }
@@ -130,7 +122,7 @@ impl UIElement for Vec<String> {
 	}
 }
 
-fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
+fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>> {
 	let mut events_buffer: VecDeque<event::KeyEvent> = VecDeque::new();
 
 	while poll(Duration::from_millis(0))? {
@@ -147,88 +139,284 @@ fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
 
 struct FrameUpdateData {
 	frame_start_time: Instant,
-	// Ранее здесь также была delta time
 }
 
 #[derive(PartialEq)]
 enum PlayerAction {
 	MoveLeft,
-	ModeRight,
+	MoveRight,
 	MoveDown,
 	Drop,
 	RotateClockwise,
 	RotateCounterClockwise,
 	TogglePause,
 	Exit,
-
-	DoNothing, // Заглушка
+	DoNothing,
 }
 impl PlayerAction {
 	pub fn from_key_event(event: KeyEvent) -> Self {
 		use KeyCode::*;
 
-		if event.is_release() {
-			match event.code {
-				Char('a') | Char('ф') | Left 	=> return PlayerAction::MoveLeft,
-				Char('d') | Char('в') | Right 	=> return PlayerAction::ModeRight,
-				Char('s') | Char('ы') | Down 	=> return PlayerAction::MoveDown,
-				Char(' ') 						=> return PlayerAction::Drop,
-				Char('w') | Char('ц') | Up 		=> return PlayerAction::RotateClockwise,
-				Char('e') | Char('у') 			=> return PlayerAction::RotateCounterClockwise,
-				Char('q') | Char('й') | Esc 	=> return PlayerAction::Exit,
-				Char('p') | Char('з') 			=> return PlayerAction::TogglePause,
-
-				_ => {},
-			}
+		if event.kind != KeyEventKind::Release {
+			return PlayerAction::DoNothing;
 		}
-
-		PlayerAction::DoNothing
+		match event.code {
+			Char('a') | Char('ф') | Left   => PlayerAction::MoveLeft,
+			Char('d') | Char('в') | Right  => PlayerAction::MoveRight,
+			Char('s') | Char('ы') | Down   => PlayerAction::MoveDown,
+			Char(' ')                       => PlayerAction::Drop,
+			Char('w') | Char('ц') | Up      => PlayerAction::RotateClockwise,
+			Char('e') | Char('у')           => PlayerAction::RotateCounterClockwise,
+			Char('q') | Char('й') | Esc    => PlayerAction::Exit,
+			Char('p') | Char('з')           => PlayerAction::TogglePause,
+			_                               => PlayerAction::DoNothing,
+		}
 	}
 }
 
 struct GameState {
-	_current_figure: &'static Figure,
-	_current_figure_position: Position<u8>,
+	current_figure: &'static Figure,
+	current_figure_position: Position<u8>,
 	current_figure_rotation: Direction,
 
 	next_figure: &'static Figure,
 	board: Board,
 
 	start_level: u8,
-	lines_hit: u16, // Не увеличивать, если ур. = 29 чтобы избежать переполнения
+	lines_hit: u16,
 	score: u64,
 
 	is_paused: bool,
 
 	last_figure_lowering_time: Instant,
 	stopwatch: Stopwatch,
+
+	rng: ThreadRng,
 }
+
+fn rotate_cw(cells: &BitArray<[u8; 1]>, size: Size) -> (BitArray<[u8; 1]>, Size) {
+	let h = size.height;
+	let w = size.width;
+	let mut new_cells = BitArray::ZERO;
+	for r in 0..h {
+		for c in 0..w {
+			if cells[r * w + c] {
+				let new_r = c;
+				let new_c = h - 1 - r;
+				new_cells.set(new_r * h + new_c, true);
+			}
+		}
+	}
+	(new_cells, Size { height: w, width: h })
+}
+
+fn rotate_ccw(cells: &BitArray<[u8; 1]>, size: Size) -> (BitArray<[u8; 1]>, Size) {
+	let h = size.height;
+	let w = size.width;
+	let mut new_cells = BitArray::ZERO;
+	for r in 0..h {
+		for c in 0..w {
+			if cells[r * w + c] {
+				let new_r = w - 1 - c;
+				let new_c = r;
+				new_cells.set(new_r * h + new_c, true);
+			}
+		}
+	}
+	(new_cells, Size { height: w, width: h })
+}
+
+fn rotate_to(cells: &BitArray<[u8; 1]>, size: Size, target: Direction) -> (BitArray<[u8; 1]>, Size) {
+	use Direction::*;
+	let mut current_cells = *cells;
+	let mut current_size = size;
+	let times = match target {
+		South => 0,
+		East => 1,
+		North => 2,
+		West => 3,
+	};
+	for _ in 0..times {
+		(current_cells, current_size) = rotate_cw(&current_cells, current_size);
+	}
+	(current_cells, current_size)
+}
+
 impl GameState {
 	pub fn new(start_level: u8) -> Self {
-		let mut rng = rng();
+		let mut rng = thread_rng();
 		let board = Board::new();
 
+		let current_figure = Figure::choose_random(&mut rng);
+		let next_figure = Figure::choose_random(&mut rng);
+
 		Self {
-			_current_figure: Figure::choose_random(&mut rng),
-			_current_figure_position: Position { _x: (board.size.width / 2) as u8, _y: 0 },
+			current_figure,
+			current_figure_position: Position { x: (board.size.width / 2) as u8, y: 0 },
 			current_figure_rotation: Direction::South,
-
-			next_figure: Figure::choose_random(&mut rng),
+			next_figure,
 			board,
-
 			start_level,
 			lines_hit: 0,
 			score: 0,
-
 			is_paused: false,
-
 			last_figure_lowering_time: Instant::now(),
 			stopwatch: Stopwatch::start_new(),
+			rng,
 		}
 	}
 
+	fn current_figure_cells(&self) -> (BitArray<[u8; 1]>, Size) {
+		rotate_to(&self.current_figure.cells, self.current_figure.size, self.current_figure_rotation)
+	}
+
+	fn can_place(&self, cells: &BitArray<[u8; 1]>, size: Size, pos: Position<u8>) -> bool {
+		let board_width = self.board.size.width as u8;
+		let board_height = self.board.size.height as u8;
+		for r in 0..size.height {
+			for c in 0..size.width {
+				if cells[r * size.width + c] {
+					let board_y = pos.y + r as u8;
+					let board_x = pos.x + c as u8;
+					if board_y >= board_height || board_x >= board_width {
+						return false;
+					}
+					if self.board.rows[board_y as usize][board_x as usize] {
+						return false;
+					}
+				}
+			}
+		}
+		true
+	}
+
+	fn try_move(&mut self, dx: i8, dy: i8) -> bool {
+		let new_x = self.current_figure_position.x as i8 + dx;
+		let new_y = self.current_figure_position.y as i8 + dy;
+		if new_x < 0 || new_y < 0 {
+			return false;
+		}
+		let new_pos = Position { x: new_x as u8, y: new_y as u8 };
+		let (cells, size) = self.current_figure_cells();
+		if self.can_place(&cells, size, new_pos) {
+			self.current_figure_position = new_pos;
+			true
+		} else {
+			false
+		}
+	}
+
+	fn try_rotate(&mut self, clockwise: bool) -> bool {
+		let old_rotation = self.current_figure_rotation;
+		let new_rotation = match (old_rotation, clockwise) {
+			(Direction::South, false) => Direction::West,
+			(Direction::South, true) => Direction::East,
+			(Direction::East, false) => Direction::South,
+			(Direction::East, true) => Direction::North,
+			(Direction::North, false) => Direction::East,
+			(Direction::North, true) => Direction::West,
+			(Direction::West, false) => Direction::North,
+			(Direction::West, true) => Direction::South,
+		};
+
+		let (new_cells, new_size) = rotate_to(&self.current_figure.cells, self.current_figure.size, new_rotation);
+
+		if self.can_place(&new_cells, new_size, self.current_figure_position) {
+			self.current_figure_rotation = new_rotation;
+			return true;
+		}
+
+		let mut shifted_pos = self.current_figure_position;
+		if shifted_pos.x > 0 {
+			shifted_pos.x -= 1;
+			if self.can_place(&new_cells, new_size, shifted_pos) {
+				self.current_figure_position = shifted_pos;
+				self.current_figure_rotation = new_rotation;
+				return true;
+			}
+		}
+
+		shifted_pos.x = self.current_figure_position.x + 1;
+		if self.can_place(&new_cells, new_size, shifted_pos) {
+			self.current_figure_position = shifted_pos;
+			self.current_figure_rotation = new_rotation;
+			return true;
+		}
+
+		false
+	}
+
+	fn drop(&mut self) {
+		while self.try_move(0, 1) {}
+		self.fix_figure();
+	}
+
+	fn fix_figure(&mut self) {
+		let (cells, size) = self.current_figure_cells();
+		let pos = self.current_figure_position;
+
+		for r in 0..size.height {
+			for c in 0..size.width {
+				if cells[r * size.width + c] {
+					let board_y = pos.y + r as u8;
+					let board_x = pos.x + c as u8;
+					if board_y < self.board.size.height as u8 && board_x < self.board.size.width as u8 {
+						self.board.rows[board_y as usize].set(board_x as usize, true);
+					}
+				}
+			}
+		}
+
+		self.clear_lines();
+
+		if !self.spawn_new_figure() {
+			exit_from_game();
+		}
+
+		self.last_figure_lowering_time = Instant::now();
+	}
+
+	fn clear_lines(&mut self) {
+		let mut lines_cleared = 0;
+		let mut y = self.board.size.height as i32 - 1;
+		while y >= 0 {
+			let row = y as usize;
+			if self.board.rows[row][0..self.board.size.width].all() {
+				self.board.rows.remove(row);
+				self.board.rows.insert(0, BitArray::ZERO);
+				lines_cleared += 1;
+			} else {
+				y -= 1;
+			}
+		}
+
+		if lines_cleared > 0 {
+			let mutiplier = max(self.level(), 1);
+			let points = match lines_cleared {
+				1 => 100 * mutiplier as u64,
+				2 => 300 * mutiplier as u64,
+				3 => 500 * mutiplier as u64,
+				4 => 800 * mutiplier as u64,
+				_ => 0,
+			};
+			self.score += points;
+			self.lines_hit += lines_cleared as u16;
+		}
+	}
+
+	fn spawn_new_figure(&mut self) -> bool {
+		self.current_figure = self.next_figure;
+		self.next_figure = Figure::choose_random(&mut self.rng);
+		self.current_figure_position = Position {
+			x: (self.board.size.width / 2) as u8,
+			y: 0,
+		};
+		self.current_figure_rotation = Direction::South;
+		let (cells, size) = self.current_figure_cells();
+		self.can_place(&cells, size, self.current_figure_position)
+	}
+
 	pub fn update(&mut self, data: &FrameUpdateData) -> std::io::Result<()> {
-		// Обработка ввода //
 		let last_released_keys = collect_last_key_events()?;
 		if !last_released_keys.is_empty() {
 			for key_event in last_released_keys.iter() {
@@ -249,50 +437,40 @@ impl GameState {
 				}
 
 				match action {
-					MoveDown => self.last_figure_lowering_time = data.frame_start_time,
-					Drop => { }
-					MoveLeft => { }
-					ModeRight => { }
-					RotateCounterClockwise => self.rotate_current_figure(false),
-					RotateClockwise => self.rotate_current_figure(true),
+					MoveLeft => { self.try_move(-1, 0); }
+					MoveRight => { self.try_move(1, 0); }
+					MoveDown => {
+						self.try_move(0, 1);
+						self.last_figure_lowering_time = data.frame_start_time;
+					}
+					Drop => self.drop(),
+					RotateClockwise => { self.try_rotate(true); }
+					RotateCounterClockwise => { self.try_rotate(false); }
 					_ => {}
 				}
 			}
 		}
 
-		// Опускание фигуры //
-		if data.frame_start_time.duration_since(
-			self.last_figure_lowering_time
-		) > self.figure_lowering_duration() {
-			// self.current_figure_position.y += 1;
-
-			self.last_figure_lowering_time = data.frame_start_time;
+		if !self.is_paused {
+			if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
+				if !self.try_move(0, 1) {
+					self.fix_figure();
+				}
+				self.last_figure_lowering_time = data.frame_start_time;
+			}
 		}
 
 		Ok(())
 	}
 
-	/*
-УРОВЕНЬ: 9999    <! . . . . . . . . .!>  ВПРАВО:    [→ / D]
-ВРЕМЯ:   999:59  <! .[][][] . . . . .!>  ВЛЕВО:     [← / A]
-СЧЁТ:    170     <! . . .[] . . . . .!>  ВНИЗ:      [↓ / S]
-                 <! . . . . . . . . .!>  ОПУСТИТЬ:  [SPACE]
-     [][][]      <! . . . .[] . . . .!>  ПОВЕРНУТЬ: [Q] & [E / ↑]
-     []          <! . . . .[][][] . .!>
-                 <![] * * *[][] . .[]!>
-                 <![][][] *[][][][][]!>  ПАУЗА: [P]
-                 <!==================!>  ВЫЙТИ: [ESC]
-                   \/\/\/\/\/\/\/\/\/
-	*/
 	pub fn render_frame(&self) -> Vec<String> {
-		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
-		const FIGURE_CELL:		Pixel = ['[', ']'];
-		const _PREVIEW_CELL: 	Pixel = [' ', '*'];
-		const EMPTY_CELL: 		Pixel = [' ', '.'];
-		const LEFT_BORDER: 		Pixel = ['<', '!'];
-		const RIGHT_BORDER: 	Pixel = ['!', '>'];
-		const BOTTOM_BORDER: 	Pixel = ['=', '='];
-		const BOTTOM_CLOSING: 	Pixel = ['\\','/'];
+		const EMPTY_PIXEL:        Pixel = [' ', ' '];
+		const FIGURE_CELL:        Pixel = ['[', ']'];
+		const EMPTY_CELL:         Pixel = [' ', '.'];
+		const LEFT_BORDER:        Pixel = ['<', '!'];
+		const RIGHT_BORDER:       Pixel = ['!', '>'];
+		const BOTTOM_BORDER:      Pixel = ['=', '='];
+		const BOTTOM_CLOSING:      Pixel = ['\\','/'];
 		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = EMPTY_PIXEL;
 		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = EMPTY_PIXEL;
 
@@ -302,12 +480,12 @@ impl GameState {
 		const PAUSE_LABEL_OPENING: char = '[';
 		const PAUSE_LABEL_CLOSING: char = ']';
 
-		let statistics_part: Vec<String> = (|| { // <- Анонимная функция!
+		let statistics_part: Vec<String> = (|| {
 			let round_total_seconds = self.stopwatch.elapsed().as_secs();
 			let label_and_value = [
 				("УРОВЕНЬ:", self.level().to_string()),
-				("ВРЕМЯ:", 	format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
-				("СЧЁТ:", 	self.score.to_string()),
+				("ВРЕМЯ:",  format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
+				("СЧЁТ:",   self.score.to_string()),
 			];
 
 			let max_labels_width = label_and_value.iter()
@@ -320,13 +498,11 @@ impl GameState {
 				.unwrap_or(0);
 
 			let mut lines = Vec::from_iter(label_and_value.iter()
-				.map(
-					|(label, value)|
+				.map(|(label, value)|
 					format!("{:<max_labels_width$} {:<max_values_width$}", label, value)
 				)
 			);
 
-			// Следующая фигура не должна отображаться при паузе
 			if self.is_paused {
 				return lines;
 			}
@@ -340,8 +516,6 @@ impl GameState {
 					let cells_row = &figure.cells[start_index..start_index + next_figure_width];
 
 					next_figure_part.push(
-						// Для корректной работы центрирования нужно всунуть здесь пару пробелов в начале
-						// Возможно, есть более идиоматичные способы, но я не стал заморачиваться
 						iter::once([' '; GAP_BETWEEN_PARTS])
 						.chain(
 							cells_row.iter().map(|cell| {
@@ -354,7 +528,6 @@ impl GameState {
 				}
 			}
 
-			// Отступ в 1 строку
 			let actual_width = lines.required_width();
 			lines.push(String::from_iter(iter::repeat(' ').take(actual_width)));
 
@@ -370,20 +543,51 @@ impl GameState {
 			let board_width = self.board.size.width;
 			let pause_label_row = (self.board.size.height / 2) - 1;
 
-			// Текущая фигура не должна отображаться при паузе
+			let (figure_cells, figure_size, figure_pos) = if !self.is_paused {
+				let (cells, size) = self.current_figure_cells();
+				(Some(cells), Some(size), Some(self.current_figure_position))
+			} else {
+				(None, None, None)
+			};
 
 			for row in 0..self.board.size.height {
-				let cells_row = &self.board.rows[row];
-
 				lines.push(
 					if !(self.is_paused && row == pause_label_row) {
-						iter::once(LEFT_BORDER)
-						.chain(cells_row.iter().take(board_width).map(|cell| {
-							if *cell && !self.is_paused {FIGURE_CELL} else {EMPTY_CELL}
-						}))
-						.chain(iter::once(RIGHT_BORDER))
-						.flatten()
-						.collect::<String>()
+						let mut line = String::new();
+						line.push(LEFT_BORDER[0]);
+						line.push(LEFT_BORDER[1]);
+
+						for col in 0..board_width {
+							let board_cell_occupied = self.board.rows[row][col];
+							let figure_here = if let (Some(cells), Some(size), Some(pos)) = (figure_cells.as_ref(), figure_size, figure_pos) {
+								if row >= pos.y as usize && row < (pos.y as usize + size.height) &&
+								   col >= pos.x as usize && col < (pos.x as usize + size.width) {
+									let r = row - pos.y as usize;
+									let c = col - pos.x as usize;
+									cells[r * size.width + c]
+								} else {
+									false
+								}
+							} else {
+								false
+							};
+
+							if figure_here {
+								line.push(FIGURE_CELL[0]);
+								line.push(FIGURE_CELL[1]);
+							} else if board_cell_occupied {
+								line.push(FIGURE_CELL[0]);
+								line.push(FIGURE_CELL[1]);
+							} else {
+								line.push(EMPTY_CELL[0]);
+								line.push(EMPTY_CELL[1]);
+							}
+						}
+
+						line.push(RIGHT_BORDER[0]);
+						line.push(RIGHT_BORDER[1]);
+
+						line
 					} else {
 						let mut line = String::new();
 						line.push(LEFT_BORDER[0]);
@@ -394,7 +598,6 @@ impl GameState {
 						let label = format!("{} ПАУЗА {}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING);
 						let label_len = label.chars().count();
 
-						// Отступы с двух сторон
 						let paddings_sum = width.saturating_sub(label_len);
 						let left_padding = paddings_sum / 2;
 						let right_padding = paddings_sum - left_padding;
@@ -415,7 +618,6 @@ impl GameState {
 				);
 			}
 
-			// Bottom line
 			lines.push(
 				iter::once(LEFT_BORDER)
 				.chain(iter::repeat_n(BOTTOM_BORDER, board_width))
@@ -424,7 +626,6 @@ impl GameState {
 				.collect::<String>()
 			);
 
-			// Closing line
 			lines.push(
 				iter::once(BOTTOM_CLOSING_LEFT_BORDER)
 				.chain(iter::repeat_n(BOTTOM_CLOSING, board_width))
@@ -440,32 +641,26 @@ impl GameState {
 		let board_part_width = board_part.required_width();
 
 		let mut rendered_lines: Vec<String> = vec![];
-		let gap = String::from_iter(
-			iter::repeat_n(' ', GAP_BETWEEN_PARTS)
-		);
+		let gap = String::from_iter(iter::repeat_n(' ', GAP_BETWEEN_PARTS));
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			use EitherOrBoth::*;
 
-			let stat_and_board_lines: (&str, &str) = match pair {
-				Both(stat, board) => (stat, board),
-				Left(stat) => (stat, ""),
-				Right(board) => ("", board),
+			let (stat_line, board_line) = match pair {
+				Both(stat, board) => (stat.as_str(), board.as_str()),
+				Left(stat) => (stat.as_str(), ""),
+				Right(board) => ("", board.as_str()),
 			};
 
 			rendered_lines.push(format!(
 				"{:<stat_part_width$}{gap}{:<board_part_width$}",
-				stat_and_board_lines.0, stat_and_board_lines.1,)
-			);
+				stat_line, board_line
+			));
 		}
 
 		rendered_lines
 	}
 
-	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
 	fn toggle_pause(&mut self) {
-		// При снятии паузы игра должна провисеть 1 секунду,
-		// чтобы игрок увидел где текущая фигура и какая следующая
-
 		if !PAUSING_FEATURE_ENABLED {
 			return;
 		}
@@ -477,29 +672,10 @@ impl GameState {
 		}
 	}
 
-	fn rotate_current_figure(&mut self, clockwise: bool) {
-		use Direction::*;
-
-		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
-			(South, false) => West,
-			(South, true) => East,
-			(East, false) => South,
-			(East, true) => North,
-			(North, false) => East,
-			(North, true) => West,
-			(West, false) => North,
-			(West, true) => South,
-		}
-	}
-
 	fn figure_lowering_duration(&self) -> Duration {
 		let level = self.level();
 		match level {
-			// 0-8 ур. от 800мс до 100мс с линейным изменением
-			// 1мс = 1000мкс
 			0..=8 => Duration::from_micros(800_000 - (83_500 * level as u64)),
-			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
-			// С формулой мудрить не стал
 			9 => Duration::from_millis(100),
 			10..=12 => Duration::from_millis(83),
 			13..=15 => Duration::from_millis(67),
@@ -523,28 +699,16 @@ enum Direction {
 	West,
 }
 
-
-// TODO: перевести cells в массив размера 1, 2 или 4
-// со всеми вариантами поворота в формате bitarr клеток,
-// вычисляемых в конструкторе
 struct Figure {
 	size: Size,
-	cells: BitArray<[u8; 1]>, // До 8 клеток
+	cells: BitArray<[u8; 1]>,
 }
 impl Figure {
 	const fn new(size: Size, cells: BitArray<[u8; 1]>) -> Self {
 		Self { size, cells }
 	}
 
-	// size.area() должен быть == cells.count() !!!
-	// В const контексте нельзя вызвать .count(),
-	// поэтому без конструктора и проверок.
 	const VARIANTS: [Figure; 7] = [
-		// Figure { // I
-		// 	size: Size { height: 4, width: 1 },
-		// 	cells: bitarr![const u8, Lsb0; 1, 1, 1, 1],
-		// },
-		// Перевести на это все фигуры, если будет работать
 		Figure::new( // I
 			Size { height: 4, width: 1 },
 			bitarr![const u8, Lsb0; 1, 1, 1, 1]
@@ -637,12 +801,9 @@ const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 
 const FPS_LIMIT: u16 = 120;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
-// Время на 1 кадр ↑
 
-// Дореализую позже
 const PAUSING_FEATURE_ENABLED: bool = true;
 
-// Решил использовать AtomicBool чтобы не писать unsafe, а так тут это не имеет значения
 static IS_RUNNING: AtomicBool = AtomicBool::new(true);
 pub fn exit_from_game() {
 	IS_RUNNING.store(false, Ordering::Release);
