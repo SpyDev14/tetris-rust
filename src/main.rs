@@ -31,6 +31,7 @@ use crossterm::{
 	event::{self, Event, KeyCode, poll},
 };
 
+// Ps: почти все комментарии удалила глупая нейросеть когда я попросил её реализовать нужную функциональность, увы
 // -------------
 #[derive(Debug, Clone, Copy)]
 struct Position<T> {
@@ -203,22 +204,6 @@ fn rotate_cw(cells: &BitArray<[u8; 1]>, size: Size) -> (BitArray<[u8; 1]>, Size)
 			if cells[r * w + c] {
 				let new_r = c;
 				let new_c = h - 1 - r;
-				new_cells.set(new_r * h + new_c, true);
-			}
-		}
-	}
-	(new_cells, Size { height: w, width: h })
-}
-
-fn rotate_ccw(cells: &BitArray<[u8; 1]>, size: Size) -> (BitArray<[u8; 1]>, Size) {
-	let h = size.height;
-	let w = size.width;
-	let mut new_cells = BitArray::ZERO;
-	for r in 0..h {
-		for c in 0..w {
-			if cells[r * w + c] {
-				let new_r = w - 1 - c;
-				let new_c = r;
 				new_cells.set(new_r * h + new_c, true);
 			}
 		}
@@ -799,7 +784,7 @@ fn on_programm_exit(out: &mut Stdout, rendered_frame: &Vec<String>) -> std::io::
 const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
 const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 
-const FPS_LIMIT: u16 = 120;
+const FPS_LIMIT: u16 = 60;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 
 const PAUSING_FEATURE_ENABLED: bool = true;
