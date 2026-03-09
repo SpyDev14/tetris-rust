@@ -32,8 +32,9 @@ use crossterm::{
 
 // -------------
 #[derive(Debug, Clone, Copy)]
-struct Point<T> {
-	x: T, y: T,
+struct Point {
+	x: usize,
+	y: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +104,14 @@ impl Board {
 		);
 
 		Self {size: Self::SIZE, rows }
+	}
+
+	pub fn can_pace_figure(&self, figure: &Figure, pos: &Point) -> bool {
+		true // Заглушка
+	}
+
+	pub fn place_figure(&mut self, figure: &Figure, pos: &Point) {
+
 	}
 }
 
@@ -198,7 +207,7 @@ trait State {
 }
 struct GameState {
 	_current_figure: Figure,
-	current_figure_position: Point<u8>,
+	current_figure_position: Point,
 	current_figure_rotation: Direction,
 
 	next_figure: Figure,
@@ -534,8 +543,7 @@ impl Figure {
 		Self { size, cells }
 	}
 
-	pub fn rotated(&self, by_clockwise: bool) -> Self
-	{
+	pub fn rotated(&self, by_clockwise: bool) -> Self {
 		let old_h = self.size.height;
 		let old_w = self.size.width;
 		let new_h = old_w;
@@ -565,8 +573,7 @@ impl Figure {
 		Self { size, cells }
 	}
 
-	pub fn rotate(&mut self, by_clockwise: bool)
-	{
+	pub fn rotate(&mut self, by_clockwise: bool) {
 		let rotated = self.rotated(by_clockwise);
 		self.size = rotated.size;
 		self.cells = rotated.cells;
