@@ -1,11 +1,11 @@
 use std::cmp::{min};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::{VecDeque};
 use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
+use crossterm::Command;
 use crossterm::event::KeyEvent;
 use itertools::{EitherOrBoth, Itertools};
 use rand::{
@@ -32,8 +32,8 @@ use crossterm::{
 
 // -------------
 #[derive(Debug, Clone, Copy)]
-struct Position<T> {
-	_x: T, _y: T,
+struct Point<T> {
+	x: T, y: T,
 }
 
 #[derive(Clone, Copy)]
@@ -42,7 +42,7 @@ struct Size {
 	width: usize
 }
 impl Size {
-	pub fn _area(&self) -> usize {
+	pub fn area(&self) -> usize {
 		self.height * self.width
 	}
 }
@@ -95,14 +95,14 @@ struct Board {
 }
 
 impl Board {
-	const BOARD_SIZE: Size = Size { width: 10, height: 20 };
+	const SIZE: Size = Size { width: 10, height: 20 };
 
 	pub fn new() -> Self {
 		let rows = Vec::from_iter(
-			iter::repeat_n(BitArray::ZERO, Self::BOARD_SIZE.height)
+			iter::repeat_n(BitArray::ZERO, Self::SIZE.height)
 		);
 
-		Self {size: Self::BOARD_SIZE, rows }
+		Self {size: Self::SIZE, rows }
 	}
 }
 
@@ -145,7 +145,7 @@ fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
 	Ok(Vec::from(events_buffer))
 }
 
-struct FrameUpdateData {
+struct UpdateData {
 	frame_start_time: Instant,
 	// Ранее здесь также была delta time
 }
@@ -186,9 +186,19 @@ impl PlayerAction {
 	}
 }
 
+enum UpdateAction {
+	Continue,
+	Exit,
+	ChangeState(Box<dyn State>)
+}
+
+trait State {
+	fn update(&mut self, data: &UpdateData) -> std::io::Result<UpdateAction>;
+	fn render_frame(&self, frame_buffer: &mut String);
+}
 struct GameState {
 	_current_figure: &'static Figure,
-	_current_figure_position: Position<u8>,
+	current_figure_position: Point<u8>,
 	current_figure_rotation: Direction,
 
 	next_figure: &'static Figure,
@@ -210,7 +220,7 @@ impl GameState {
 
 		Self {
 			_current_figure: Figure::choose_random(&mut rng),
-			_current_figure_position: Position { _x: (board.size.width / 2) as u8, _y: 0 },
+			current_figure_position: Point { x: (board.size.width / 2) as u8, y: 0 },
 			current_figure_rotation: Direction::South,
 
 			next_figure: Figure::choose_random(&mut rng),
@@ -226,8 +236,61 @@ impl GameState {
 			stopwatch: Stopwatch::start_new(),
 		}
 	}
+	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
+	fn toggle_pause(&mut self) {
+		// При снятии паузы игра должна провисеть 1 секунду,
+		// чтобы игрок увидел где текущая фигура и какая следующая
 
-	pub fn update(&mut self, data: &FrameUpdateData) -> std::io::Result<()> {
+		if !PAUSING_FEATURE_ENABLED {
+			return;
+		}
+		self.is_paused = !self.is_paused;
+
+		match self.is_paused {
+			false => self.stopwatch.start(),
+			true  => self.stopwatch.pause(),
+		}
+	}
+
+	fn rotate_current_figure(&mut self, clockwise: bool) {
+		use Direction::*;
+
+		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
+			(South, false) => West,
+			(South, true) => East,
+			(East, false) => South,
+			(East, true) => North,
+			(North, false) => East,
+			(North, true) => West,
+			(West, false) => North,
+			(West, true) => South,
+		}
+	}
+
+	fn figure_lowering_duration(&self) -> Duration {
+		let level = self.level();
+		match level {
+			// 0-8 ур. от 800мс до 100мс с линейным изменением
+			// 1мс = 1000мкс
+			0..=8 => Duration::from_micros(800_000 - (83_500 * level as u64)),
+			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
+			// С формулой мудрить не стал
+			9 => Duration::from_millis(100),
+			10..=12 => Duration::from_millis(83),
+			13..=15 => Duration::from_millis(67),
+			16..=18 => Duration::from_millis(50),
+			19..=28 => Duration::from_millis(33),
+			_ => Duration::from_millis(17)
+		}
+	}
+
+	fn level(&self) -> u8 {
+		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
+	}
+}
+
+impl State for GameState {
+	fn update(&mut self, data: &UpdateData) -> std::io::Result<UpdateAction> {
 		// Обработка ввода //
 		let last_released_keys = collect_last_key_events()?;
 		if !last_released_keys.is_empty() {
@@ -237,15 +300,15 @@ impl GameState {
 
 				match action {
 					Exit => {
-						exit_from_game();
-						return Ok(());
+						// exit_from_game();
+						return Ok(UpdateAction::Exit);
 					}
 					TogglePause => self.toggle_pause(),
 					_ => {}
 				}
 
 				if self.is_paused {
-					return Ok(());
+					return Ok(UpdateAction::Continue);
 				}
 
 				match action {
@@ -264,12 +327,12 @@ impl GameState {
 		if data.frame_start_time.duration_since(
 			self.last_figure_lowering_time
 		) > self.figure_lowering_duration() {
-			// self.current_figure_position.y += 1;
+			self.current_figure_position.y += 1;
 
 			self.last_figure_lowering_time = data.frame_start_time;
 		}
 
-		Ok(())
+		Ok(UpdateAction::Continue)
 	}
 
 	/*
@@ -284,7 +347,7 @@ impl GameState {
                  <!==================!>  ВЫЙТИ: [ESC]
                    \/\/\/\/\/\/\/\/\/
 	*/
-	pub fn render_frame(&self) -> Vec<String> {
+	fn render_frame(&self, frame_buffer: &mut String) {
 		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
 		const _PREVIEW_CELL: 	Pixel = [' ', '*'];
@@ -439,7 +502,6 @@ impl GameState {
 		let stat_part_width = statistics_part.required_width();
 		let board_part_width = board_part.required_width();
 
-		let mut rendered_lines: Vec<String> = vec![];
 		let gap = String::from_iter(
 			iter::repeat_n(' ', GAP_BETWEEN_PARTS)
 		);
@@ -452,65 +514,11 @@ impl GameState {
 				Right(board) => ("", board),
 			};
 
-			rendered_lines.push(format!(
-				"{:<stat_part_width$}{gap}{:<board_part_width$}",
-				stat_and_board_lines.0, stat_and_board_lines.1,)
-			);
+			frame_buffer.push_str(format!(
+				"{:<stat_part_width$}{gap}{:<board_part_width$}\n",
+				stat_and_board_lines.0, stat_and_board_lines.1,
+			).as_str());
 		}
-
-		rendered_lines
-	}
-
-	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
-	fn toggle_pause(&mut self) {
-		// При снятии паузы игра должна провисеть 1 секунду,
-		// чтобы игрок увидел где текущая фигура и какая следующая
-
-		if !PAUSING_FEATURE_ENABLED {
-			return;
-		}
-		self.is_paused = !self.is_paused;
-
-		match self.is_paused {
-			false => self.stopwatch.start(),
-			true  => self.stopwatch.pause(),
-		}
-	}
-
-	fn rotate_current_figure(&mut self, clockwise: bool) {
-		use Direction::*;
-
-		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
-			(South, false) => West,
-			(South, true) => East,
-			(East, false) => South,
-			(East, true) => North,
-			(North, false) => East,
-			(North, true) => West,
-			(West, false) => North,
-			(West, true) => South,
-		}
-	}
-
-	fn figure_lowering_duration(&self) -> Duration {
-		let level = self.level();
-		match level {
-			// 0-8 ур. от 800мс до 100мс с линейным изменением
-			// 1мс = 1000мкс
-			0..=8 => Duration::from_micros(800_000 - (83_500 * level as u64)),
-			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
-			// С формулой мудрить не стал
-			9 => Duration::from_millis(100),
-			10..=12 => Duration::from_millis(83),
-			13..=15 => Duration::from_millis(67),
-			16..=18 => Duration::from_millis(50),
-			19..=28 => Duration::from_millis(33),
-			_ => Duration::from_millis(17)
-		}
-	}
-
-	fn level(&self) -> u8 {
-		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
 	}
 }
 
@@ -540,10 +548,6 @@ impl Figure {
 	// В const контексте нельзя вызвать .count(),
 	// поэтому без конструктора и проверок.
 	const VARIANTS: [Figure; 7] = [
-		// Figure { // I
-		// 	size: Size { height: 4, width: 1 },
-		// 	cells: bitarr![const u8, Lsb0; 1, 1, 1, 1],
-		// },
 		// Перевести на это все фигуры, если будет работать
 		Figure::new( // I
 			Size { height: 4, width: 1 },
@@ -600,14 +604,10 @@ impl Figure {
 	}
 }
 
-fn draw_frame(rendered_frame: &Vec<String>) -> std::io::Result<()> {
+fn draw_frame(rendered_frame: &String) -> std::io::Result<()> {
 	let mut out: Stdout = stdout();
 	out.execute(MoveTo(0, 0))?;
-
-	for line in rendered_frame {
-		out.execute(Print(line))?;
-		out.execute(MoveToNextLine(1))?;
-	}
+	out.execute(Print(rendered_frame))?;
 
 	Ok(())
 }
@@ -620,7 +620,7 @@ fn on_programm_enter(out: &mut Stdout) -> std::io::Result<()> {
 	out.execute(cursor::Hide)?;
 	Ok(())
 }
-fn on_programm_exit(out: &mut Stdout, rendered_frame: &Vec<String>) -> std::io::Result<()> {
+fn on_programm_exit(out: &mut Stdout, rendered_frame: &String) -> std::io::Result<()> {
 	out.execute(ResetColor)?;
 	out.execute(Clear(ClearType::All))?;
 	out.execute(SetForegroundColor(FOREGROUND_COLOR))?;
@@ -639,30 +639,30 @@ const FPS_LIMIT: u16 = 120;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 // Время на 1 кадр ↑
 
-// Дореализую позже
-const PAUSING_FEATURE_ENABLED: bool = true;
-
-// Решил использовать AtomicBool чтобы не писать unsafe, а так тут это не имеет значения
-static IS_RUNNING: AtomicBool = AtomicBool::new(true);
-pub fn exit_from_game() {
-	IS_RUNNING.store(false, Ordering::Release);
-}
-fn is_running() -> bool {
-	IS_RUNNING.load(Ordering::Acquire)
-}
-
 fn main() -> std::io::Result<()> {
+	let mut is_running= true;
+
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
-	let mut state = GameState::new(0);
-	let mut rendered_frame: Vec<String> = vec![];
-	while is_running() {
+	let mut state: Box<dyn State> = Box::new(GameState::new(0));
+	let mut frame_buffer: String = String::new();
+	while is_running {
 		let frame_start_time = Instant::now();
 
-		state.update(&FrameUpdateData { frame_start_time })?;
-		rendered_frame = state.render_frame();
-		draw_frame(&rendered_frame)?;
+		let data = UpdateData { frame_start_time };
+		let update_action = state.update(&data)?;
+
+		frame_buffer.clear();
+		state.render_frame(&mut frame_buffer);
+		draw_frame(&frame_buffer)?;
+
+		use UpdateAction::*;
+		match update_action {
+			Continue => {},
+			ChangeState(new_state) => state = new_state,
+			Exit => is_running = false,
+		}
 
 		let frame_time = frame_start_time.elapsed();
 		if frame_time < FRAME_DURATION {
@@ -670,6 +670,6 @@ fn main() -> std::io::Result<()> {
 		}
 	}
 
-	on_programm_exit(&mut out, &rendered_frame)?;
+	on_programm_exit(&mut out, &frame_buffer)?;
 	Ok(())
 }
