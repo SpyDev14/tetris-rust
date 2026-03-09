@@ -197,11 +197,11 @@ trait State {
 	fn render_frame(&self, frame_buffer: &mut String);
 }
 struct GameState {
-	_current_figure: &'static Figure,
+	_current_figure: Figure,
 	current_figure_position: Point<u8>,
 	current_figure_rotation: Direction,
 
-	next_figure: &'static Figure,
+	next_figure: Figure,
 	board: Board,
 
 	start_level: u8,
@@ -522,32 +522,60 @@ impl State for GameState {
 	}
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-enum Direction {
-	South,
-	East,
-	North,
-	West,
-}
 
-
-// TODO: перевести cells в массив размера 1, 2 или 4
-// со всеми вариантами поворота в формате bitarr клеток,
-// вычисляемых в конструкторе
+type FigureCells = BitArray<[u8; 1]>;
+#[derive(Clone)]
 struct Figure {
 	size: Size,
-	cells: BitArray<[u8; 1]>, // До 8 клеток
+	cells: FigureCells, // До 8 клеток
 }
 impl Figure {
-	const fn new(size: Size, cells: BitArray<[u8; 1]>) -> Self {
+	const fn new(size: Size, cells: FigureCells) -> Self {
 		Self { size, cells }
+	}
+
+	pub fn rotated(&self, by_clockwise: bool) -> Self
+	{
+		let old_h = self.size.height;
+		let old_w = self.size.width;
+		let new_h = old_w;
+		let new_w = old_h;
+
+		let mut new_cells = FigureCells::ZERO;
+		for y in 0..old_h {
+			for x in 0..old_w {
+				if self.cells[y * old_w + x] {
+					let new_x; let new_y;
+					if by_clockwise {
+						new_x = old_h - 1 - y;
+						new_y = x;
+					} else {
+						new_x = y;
+						new_y = new_h - 1 - x;
+					}
+
+					new_cells.set(new_y * new_w + new_x, true);
+				}
+			}
+		}
+
+		let size = Size { height: new_h, width: new_w };
+		let cells = new_cells;
+
+		Self { size, cells }
+	}
+
+	pub fn rotate(&mut self, by_clockwise: bool)
+	{
+		let rotated = self.rotated(by_clockwise);
+		self.size = rotated.size;
+		self.cells = rotated.cells;
 	}
 
 	// size.area() должен быть == cells.count() !!!
 	// В const контексте нельзя вызвать .count(),
 	// поэтому без конструктора и проверок.
-	const VARIANTS: [Figure; 7] = [
+	const BASE_FIGURES: [Figure; 7] = [
 		// Перевести на это все фигуры, если будет работать
 		Figure::new( // I
 			Size { height: 4, width: 1 },
@@ -599,8 +627,8 @@ impl Figure {
 		},
 	];
 
-	pub fn choose_random(rng: &mut ThreadRng) -> &'static Self {
-		Self::VARIANTS.choose(rng).unwrap()
+	pub fn choose_random(rng: &mut ThreadRng) -> Self {
+		Self::BASE_FIGURES.choose(rng).unwrap().clone()
 	}
 }
 
