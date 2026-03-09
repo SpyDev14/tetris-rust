@@ -1,14 +1,11 @@
-use std::cmp::{min};
 use std::time::{Duration, Instant};
 use std::collections::{VecDeque};
 use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
-use crossterm::Command;
 use crossterm::event::KeyEvent;
 use itertools::{EitherOrBoth, Itertools};
-use rand::seq;
 use rand::{
 	rngs::ThreadRng,
 	seq::IndexedRandom,
@@ -27,7 +24,7 @@ use crossterm::{
 		Attribute,
 	},
 	terminal::{self, Clear, ClearType},
-	cursor::{self, MoveTo, MoveToNextLine},
+	cursor::{self, MoveTo},
 	event::{self, Event, KeyCode, poll},
 };
 
@@ -37,13 +34,23 @@ struct Point {
 	x: usize,
 	y: usize,
 }
+impl Point {
+	#[inline(always)]
+	pub const fn new(x: usize, y: usize) -> Self {
+		Self { x, y }
+	}
+}
 
 #[derive(Clone, Copy)]
 struct Size {
 	height: usize,
-	width: usize
+	width: usize,
 }
 impl Size {
+	#[inline(always)]
+	pub const fn new(width: usize, height: usize) -> Self {
+		Self { height, width }
+	}
 	pub fn area(&self) -> usize {
 		self.height * self.width
 	}
@@ -105,23 +112,29 @@ impl Board {
 		Self { size, cells }
 	}
 
+	/// Clear filled lines, move top lines to down.
 	/// Returns count of cleared lines
 	pub fn clear_lines(&mut self) -> u8 {
 		0
 	}
 
-	pub fn can_pace_figure(&self, figure: &Figure, pos: &Point) -> bool {
-		for y in 0..self.size.height {
-			for x in 0..self.size.width {
-
-			}
-		}
-
-		true
+	/// Проверяет, можно ли разместить фигуру по переданной позиции
+	/// (в пределах доски и без пересечения с заполненными клетками).
+	/// #### Примеры :
+	/// - Не выйдет ли фигура за границы поля / упрётся в
+	///   размещённые фигуры при перемещении вправо / влево
+	/// - Можно ли заспавнить новую фигуру
+	pub fn can_place(&self, figure: &Figure, pos: &Point) -> bool {
+		todo!()
 	}
 
-	pub fn place_figure(&mut self, figure: &Figure, pos: &Point) {
+	/// Возвращает позицию фигуры, если разместить её по переданной позиции
+	pub fn drop_position(&self, figure: &Figure, x: usize) -> Point {
+		todo!()
+	}
 
+	pub fn drop_figure(&mut self, figure: &Figure, x: usize) {
+		todo!()
 	}
 }
 
@@ -164,7 +177,7 @@ fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
 	Ok(Vec::from(events_buffer))
 }
 
-struct UpdateData {
+struct UpdateContext {
 	frame_start_time: Instant,
 	// Ранее здесь также была delta time
 }
@@ -205,19 +218,23 @@ impl PlayerAction {
 	}
 }
 
-enum UpdateAction {
+enum NextUpdateAction {
 	Continue,
 	Exit,
-	ChangeState(Box<dyn State>)
+	//ChangeState(Box<dyn State>)
 }
 
+// Подразумевается также лобби и GameOverState, но я уже хочу поскорее закончить
+// Иначе там огого расширять и писать: рендеринг других стейтов, обработка ввода,
+// и так далее.
 trait State {
-	fn update(&mut self, data: &UpdateData) -> std::io::Result<UpdateAction>;
+	fn update(&mut self, context: &UpdateContext) -> std::io::Result<NextUpdateAction>;
 	fn render_frame(&self, frame_buffer: &mut String);
 }
+
 struct GameState {
 	current_figure: Figure,
-	current_figure_position: Point,
+	current_position: Point,
 
 	next_figure: Figure,
 	board: Board,
@@ -234,11 +251,11 @@ struct GameState {
 impl GameState {
 	pub fn new(start_level: u8) -> Self {
 		let mut rng = rng();
-		let board = Board::new();
+		let board = Board::new(Size::new(10, 20));
 
 		Self {
 			current_figure: Figure::choose_random(&mut rng),
-			current_figure_position: Point { x: (board.size.width / 2), y: 0 },
+			current_position: Point::new(board.size.width / 2, 0),
 
 			next_figure: Figure::choose_random(&mut rng),
 			board,
@@ -290,7 +307,7 @@ impl GameState {
 }
 
 impl State for GameState {
-	fn update(&mut self, data: &UpdateData) -> std::io::Result<UpdateAction> {
+	fn update(&mut self, context: &UpdateContext) -> std::io::Result<NextUpdateAction> {
 		// Обработка ввода //
 		let last_released_keys = collect_last_key_events()?;
 		if !last_released_keys.is_empty() {
@@ -299,40 +316,37 @@ impl State for GameState {
 				let action = PlayerAction::from_key_event(*key_event);
 
 				match action {
-					Exit => {
-						// exit_from_game();
-						return Ok(UpdateAction::Exit);
-					}
+					Exit => { return Ok(NextUpdateAction::Exit); }
 					TogglePause => self.toggle_pause(),
 					_ => {}
 				}
 
 				if self.is_paused {
-					return Ok(UpdateAction::Continue);
+					return Ok(NextUpdateAction::Continue);
 				}
 
 				match action {
-					MoveDown => self.last_figure_lowering_time = data.frame_start_time,
+					MoveDown => self.last_figure_lowering_time = context.frame_start_time,
 					Drop => { }
 					MoveLeft => { }
 					ModeRight => { }
-					RotateCounterClockwise => self.rotate_current_figure(false),
-					RotateClockwise => self.rotate_current_figure(true),
+					RotateClockwise => self.current_figure.rotate(true),
+					RotateCounterClockwise => self.current_figure.rotate(false),
 					_ => {}
 				}
 			}
 		}
 
 		// Опускание фигуры //
-		if data.frame_start_time.duration_since(
+		if context.frame_start_time.duration_since(
 			self.last_figure_lowering_time
 		) > self.figure_lowering_duration() {
-			self.current_figure_position.y += 1;
+			self.current_position.y += 1;
 
-			self.last_figure_lowering_time = data.frame_start_time;
+			self.last_figure_lowering_time = context.frame_start_time;
 		}
 
-		Ok(UpdateAction::Continue)
+		Ok(NextUpdateAction::Continue)
 	}
 
 	/*
@@ -396,7 +410,7 @@ impl State for GameState {
 
 			let mut next_figure_part: Vec<String> = vec![];
 			{
-				let figure = self.next_figure;
+				let figure = &self.next_figure;
 				let next_figure_width = figure.size.width;
 				for row in 0..figure.size.height {
 					let start_index = row * next_figure_width;
@@ -436,13 +450,14 @@ impl State for GameState {
 			// Текущая фигура не должна отображаться при паузе
 
 			for row in 0..self.board.size.height {
-				let cells_row = &self.board.cells[row];
+				let start_index = row * board_width;
+				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
 					if !(self.is_paused && row == pause_label_row) {
 						iter::once(LEFT_BORDER)
-						.chain(cells_row.iter().take(board_width).map(|cell| {
-							if *cell && !self.is_paused {FIGURE_CELL} else {EMPTY_CELL}
+						.chain(cells_row.iter().map(|cell| {
+							if *cell {FIGURE_CELL} else {EMPTY_CELL}
 						}))
 						.chain(iter::once(RIGHT_BORDER))
 						.flatten()
@@ -661,37 +676,35 @@ fn on_programm_exit(out: &mut Stdout, rendered_frame: &String) -> std::io::Resul
 const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
 const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 
-const FPS_LIMIT: u16 = 120;
-const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
-// Время на 1 кадр ↑
+const ENABLE_FRAMERATE_LIMIT: bool = true;
+const FPS_LIMIT: u16 = 60;
+const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64); // Время на 1 кадр
 
 fn main() -> std::io::Result<()> {
-	let mut is_running= true;
-
 	let mut out = stdout();
 	on_programm_enter(&mut out)?;
 
 	let mut state: Box<dyn State> = Box::new(GameState::new(0));
 	let mut frame_buffer: String = String::new();
-	while is_running {
+	loop {
 		let frame_start_time = Instant::now();
 
-		let data = UpdateData { frame_start_time };
-		let update_action = state.update(&data)?;
+		let update_ctx = UpdateContext { frame_start_time };
+		let next_update_action = state.update(&update_ctx)?;
 
 		frame_buffer.clear();
 		state.render_frame(&mut frame_buffer);
 		draw_frame(&frame_buffer)?;
 
-		use UpdateAction::*;
-		match update_action {
+		use NextUpdateAction::*;
+		match next_update_action {
 			Continue => {},
-			ChangeState(new_state) => state = new_state,
-			Exit => is_running = false,
+			//ChangeState(new_state) => state = new_state,
+			Exit => break,
 		}
 
 		let frame_time = frame_start_time.elapsed();
-		if frame_time < FRAME_DURATION {
+		if frame_time < FRAME_DURATION && ENABLE_FRAMERATE_LIMIT{
 			std::thread::sleep(FRAME_DURATION - frame_time);
 		}
 	}
