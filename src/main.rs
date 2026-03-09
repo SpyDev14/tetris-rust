@@ -142,18 +142,18 @@ impl Board {
 	}
 
 	/// Возвращает позицию фигуры, если разместить её по переданной позиции
-	pub fn drop_position(&self, figure: &Figure, x: usize) -> Point {
-		let mut y = 0;
-		while self.can_place(figure, &Point::new(x, y + 1)) {
+	pub fn drop_position(&self, figure: &Figure, pos: &Point) -> Point {
+		let mut y = pos.y;
+		while self.can_place(figure, &Point::new(pos.x, y + 1)) {
 			y += 1;
 		}
-		Point::new(x, y)
+		Point::new(pos.x, y)
 	}
 
 	/// Размещает фигуру на доске (занимает клетки), сразу проводит очистку
 	/// заполненных линий. Возвращает количество убранных линий.
-	pub fn drop_figure(&mut self, figure: &Figure, x: usize) -> u8 {
-		let pos = self.drop_position(figure, x);
+	pub fn drop_figure(&mut self, figure: &Figure, pos: &Point) -> u8 {
+		let final_pos = self.drop_position(figure, pos);
 
 		for dy in 0..figure.size.height {
 			for dx in 0..figure.size.width {
@@ -161,7 +161,7 @@ impl Board {
 				if !figure.cells[cell_idx] {
 					continue;
 				}
-				let board_idx = (pos.y + dy) * self.size.width + (pos.x + dx);
+				let board_idx = (final_pos.y + dy) * self.size.width + (final_pos.x + dx);
 				self.cells.set(board_idx, true);
 			}
 		}
@@ -383,7 +383,7 @@ impl GameState {
 
 	/// Размещает текущую фигуру на доске, начисляет очки и спавнит новую
 	fn drop_current_figure(&mut self) {
-		let cleared = self.board.drop_figure(&self.current_figure, self.current_position.x);
+		let cleared = self.board.drop_figure(&self.current_figure, &self.current_position);
 		self.add_score_for_lines(cleared);
 		self.spawn_new_figure();
 		self.last_figure_lowering_time = Instant::now(); // сброс таймера для новой фигуры
@@ -438,7 +438,7 @@ impl State for GameState {
 						}
 					}
 					Drop => {
-						let drop_y = self.board.drop_position(&self.current_figure, self.current_position.x).y;
+						let drop_y = self.board.drop_position(&self.current_figure, &self.current_position).y;
 						self.current_position.y = drop_y;
 						self.drop_current_figure();
 					}
@@ -556,7 +556,7 @@ impl State for GameState {
 
 			// Тень (если не пауза)
 			let shadow_pos = if !self.is_paused {
-				self.board.drop_position(&self.current_figure, self.current_position.x)
+				self.board.drop_position(&self.current_figure, &self.current_position)
 			} else {
 				self.current_position // не используется
 			};
