@@ -579,12 +579,6 @@ impl Figure {
 		Self { size, cells }
 	}
 
-	pub fn rotate(&mut self, by_clockwise: bool) {
-		let rotated = self.rotated(by_clockwise);
-		self.size = rotated.size;
-		self.cells = rotated.cells;
-	}
-
 	// size.area() должен быть == cells.count() !!!
 	// В const контексте нельзя вызвать .count(),
 	// поэтому без конструктора и проверок.
