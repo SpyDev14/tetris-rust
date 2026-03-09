@@ -8,6 +8,7 @@ use bitvec::prelude::*;
 use crossterm::Command;
 use crossterm::event::KeyEvent;
 use itertools::{EitherOrBoth, Itertools};
+use rand::seq;
 use rand::{
 	rngs::ThreadRng,
 	seq::IndexedRandom,
@@ -92,22 +93,31 @@ impl Stopwatch {
 // -------------
 struct Board {
 	size: Size,
-	rows: Vec<BitArray<[u16; 1]>>,
+	cells: BitVec,
 }
 
 impl Board {
-	const SIZE: Size = Size { width: 10, height: 20 };
-
-	pub fn new() -> Self {
-		let rows = Vec::from_iter(
-			iter::repeat_n(BitArray::ZERO, Self::SIZE.height)
+	pub fn new(size: Size) -> Self {
+		let cells = BitVec::from_iter(
+			iter::repeat_n(false, size.area())
 		);
 
-		Self {size: Self::SIZE, rows }
+		Self { size, cells }
+	}
+
+	/// Returns count of cleared lines
+	pub fn clear_lines(&mut self) -> u8 {
+		0
 	}
 
 	pub fn can_pace_figure(&self, figure: &Figure, pos: &Point) -> bool {
-		true // Заглушка
+		for y in 0..self.size.height {
+			for x in 0..self.size.width {
+
+			}
+		}
+
+		true
 	}
 
 	pub fn place_figure(&mut self, figure: &Figure, pos: &Point) {
@@ -206,16 +216,15 @@ trait State {
 	fn render_frame(&self, frame_buffer: &mut String);
 }
 struct GameState {
-	_current_figure: Figure,
+	current_figure: Figure,
 	current_figure_position: Point,
-	current_figure_rotation: Direction,
 
 	next_figure: Figure,
 	board: Board,
 
 	start_level: u8,
-	lines_hit: u16, // Не увеличивать, если ур. = 29 чтобы избежать переполнения
-	score: u64,
+	lines_hit: u16, // До 65 536
+	score: u32,     // До 4 294 967 296
 
 	is_paused: bool,
 
@@ -228,9 +237,8 @@ impl GameState {
 		let board = Board::new();
 
 		Self {
-			_current_figure: Figure::choose_random(&mut rng),
-			current_figure_position: Point { x: (board.size.width / 2) as u8, y: 0 },
-			current_figure_rotation: Direction::South,
+			current_figure: Figure::choose_random(&mut rng),
+			current_figure_position: Point { x: (board.size.width / 2), y: 0 },
 
 			next_figure: Figure::choose_random(&mut rng),
 			board,
@@ -245,34 +253,17 @@ impl GameState {
 			stopwatch: Stopwatch::start_new(),
 		}
 	}
+
 	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
 	fn toggle_pause(&mut self) {
 		// При снятии паузы игра должна провисеть 1 секунду,
 		// чтобы игрок увидел где текущая фигура и какая следующая
 
-		if !PAUSING_FEATURE_ENABLED {
-			return;
-		}
 		self.is_paused = !self.is_paused;
 
 		match self.is_paused {
 			false => self.stopwatch.start(),
 			true  => self.stopwatch.pause(),
-		}
-	}
-
-	fn rotate_current_figure(&mut self, clockwise: bool) {
-		use Direction::*;
-
-		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
-			(South, false) => West,
-			(South, true) => East,
-			(East, false) => South,
-			(East, true) => North,
-			(North, false) => East,
-			(North, true) => West,
-			(West, false) => North,
-			(West, true) => South,
 		}
 	}
 
@@ -294,7 +285,7 @@ impl GameState {
 	}
 
 	fn level(&self) -> u8 {
-		min(self.start_level as u16 + (self.lines_hit / 10), 29) as u8
+		(self.start_level as u16 + (self.lines_hit / 10)) as u8
 	}
 }
 
@@ -359,7 +350,7 @@ impl State for GameState {
 	fn render_frame(&self, frame_buffer: &mut String) {
 		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
-		const _PREVIEW_CELL: 	Pixel = [' ', '*'];
+		const PREVIEW_CELL: 	Pixel = [' ', '*'];
 		const EMPTY_CELL: 		Pixel = [' ', '.'];
 		const LEFT_BORDER: 		Pixel = ['<', '!'];
 		const RIGHT_BORDER: 	Pixel = ['!', '>'];
@@ -445,7 +436,7 @@ impl State for GameState {
 			// Текущая фигура не должна отображаться при паузе
 
 			for row in 0..self.board.size.height {
-				let cells_row = &self.board.rows[row];
+				let cells_row = &self.board.cells[row];
 
 				lines.push(
 					if !(self.is_paused && row == pause_label_row) {
