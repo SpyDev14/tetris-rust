@@ -790,8 +790,15 @@ fn on_programm_exit(out: &mut Stdout, rendered_frame: &String) -> std::io::Resul
 	Ok(())
 }
 
-const FOREGROUND_COLOR: Color = Color::Rgb { r: 24, g: 190, b: 12 };
-const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
+type ColorTheme = (Color, Color);
+
+// Сделал бы стейт настроек с кастомизацией, а так только во время компиляции
+const GREEN_THEME: ColorTheme = (Color::Rgb { r: 24, g: 190, b: 12 }, Color::Rgb { r: 4, g: 12, b: 2 });
+const _ORANGE_THEME: ColorTheme = (Color::Rgb { r: 255, g: 94, b: 0 }, Color::Rgb { r: 20, g: 8, b: 0 });
+const THEME: ColorTheme = GREEN_THEME;
+
+const FOREGROUND_COLOR: Color = THEME.0;
+const BACKGROUND_COLOR: Color = THEME.1;
 
 const ENABLE_FRAMERATE_LIMIT: bool = true;
 const FPS_LIMIT: u16 = 60;
