@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::io::{Stdout, stdout};
 use std::iter;
 
@@ -112,43 +112,107 @@ impl Board {
 		Self { size, cells }
 	}
 
-	/// Clear filled lines, move top lines to down.
-	/// Returns count of cleared lines
-	pub fn clear_lines(&mut self) -> u8 {
-		0
-	}
-
 	/// Проверяет, можно ли разместить фигуру по переданной позиции
 	/// (в пределах доски и без пересечения с заполненными клетками).
-	/// #### Примеры :
-	/// - Не выйдет ли фигура за границы поля / упрётся в
-	///   размещённые фигуры при перемещении вправо / влево
-	/// - Можно ли заспавнить новую фигуру
 	pub fn can_place(&self, figure: &Figure, pos: &Point) -> bool {
-		todo!()
+		let w = self.size.width;
+		let h = self.size.height;
+
+		for dy in 0..figure.size.height {
+			for dx in 0..figure.size.width {
+				let cell_idx = dy * figure.size.width + dx;
+				if !figure.cells[cell_idx] {
+					continue;
+				}
+
+				let x = pos.x + dx;
+				let y = pos.y + dy;
+
+				if x >= w || y >= h {
+					return false;
+				}
+
+				let board_idx = y * w + x;
+				if self.cells[board_idx] {
+					return false;
+				}
+			}
+		}
+		true
 	}
 
 	/// Возвращает позицию фигуры, если разместить её по переданной позиции
 	pub fn drop_position(&self, figure: &Figure, x: usize) -> Point {
-		todo!()
+		let mut y = 0;
+		while self.can_place(figure, &Point::new(x, y + 1)) {
+			y += 1;
+		}
+		Point::new(x, y)
 	}
 
-	pub fn drop_figure(&mut self, figure: &Figure, x: usize) {
-		todo!()
+	/// Размещает фигуру на доске (занимает клетки), сразу проводит очистку
+	/// заполненных линий. Возвращает количество убранных линий.
+	pub fn drop_figure(&mut self, figure: &Figure, x: usize) -> u8 {
+		let pos = self.drop_position(figure, x);
+
+		for dy in 0..figure.size.height {
+			for dx in 0..figure.size.width {
+				let cell_idx = dy * figure.size.width + dx;
+				if !figure.cells[cell_idx] {
+					continue;
+				}
+				let board_idx = (pos.y + dy) * self.size.width + (pos.x + dx);
+				self.cells.set(board_idx, true);
+			}
+		}
+
+		self.clear_lines()
+	}
+
+	/// Очищает заполненные линии, смещает существующие вниз, добавляет сверху новых.
+	/// Возвращает кол-во очищенных линий.
+	fn clear_lines(&mut self) -> u8 {
+		let width = self.size.width;
+		let height = self.size.height;
+
+		let mut kept_lines = Vec::new();
+		for y in 0..height {
+			let start = y * width;
+			let end = start + width;
+			let line = &self.cells[start..end];
+			if line.iter().all(|b| *b) {
+				continue;
+			}
+			kept_lines.push(line.to_bitvec());
+		}
+
+		let cleared = (height - kept_lines.len()) as u8;
+
+		let mut new_cells = BitVec::with_capacity(self.size.area());
+		new_cells.extend(iter::repeat_n(false, cleared as usize * width));
+		for line in kept_lines {
+			new_cells.extend(line);
+		}
+
+		self.cells = new_cells;
+		cleared
 	}
 }
 
 type Pixel = [char; PIXEL_LENGTH];
 const PIXEL_LENGTH: usize = 2;
 
-// Хз какое название дать :/
-// Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
+trait PushPixel {
+	fn push_pixel(&mut self, pixel: Pixel);
+}
+impl PushPixel for String {
+	fn push_pixel(&mut self, pixel: Pixel) {
+		for i in 0..PIXEL_LENGTH {
+			self.push(pixel[i]);
+		}
+	}
+}
 
-// TODO: Написать специальный UIComposer с методами настройки выравнивания, отступов и т.д
-/*
-	- with_alignment(alignment) -> self
-	- compile() -> Vec<String>
-*/
 trait UIElement {
 	fn required_width(&self) -> usize;
 }
@@ -179,13 +243,12 @@ fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
 
 struct UpdateContext {
 	frame_start_time: Instant,
-	// Ранее здесь также была delta time
 }
 
 #[derive(PartialEq)]
 enum PlayerAction {
 	MoveLeft,
-	ModeRight,
+	MoveRight,
 	MoveDown,
 	Drop,
 	RotateClockwise,
@@ -193,24 +256,23 @@ enum PlayerAction {
 	TogglePause,
 	Exit,
 
-	DoNothing, // Заглушка
+	DoNothing,
 }
 impl PlayerAction {
 	pub fn from_key_event(event: KeyEvent) -> Self {
 		use KeyCode::*;
 
-		if event.is_release() {
+		if !event.is_release() {
 			match event.code {
-				Char('a') | Char('ф') | Left 	=> return PlayerAction::MoveLeft,
-				Char('d') | Char('в') | Right 	=> return PlayerAction::ModeRight,
-				Char('s') | Char('ы') | Down 	=> return PlayerAction::MoveDown,
-				Char(' ') 						=> return PlayerAction::Drop,
-				Char('w') | Char('ц') | Up 		=> return PlayerAction::RotateClockwise,
-				Char('e') | Char('у') 			=> return PlayerAction::RotateCounterClockwise,
-				Char('q') | Char('й') | Esc 	=> return PlayerAction::Exit,
-				Char('p') | Char('з') 			=> return PlayerAction::TogglePause,
-
-				_ => {},
+				Char('a') | Char('ф') | Left  => return PlayerAction::MoveLeft,
+				Char('d') | Char('в') | Right => return PlayerAction::MoveRight,
+				Char('s') | Char('ы') | Down  => return PlayerAction::MoveDown,
+				Char(' ')                     => return PlayerAction::Drop,
+				Char('w') | Char('ц') | Up    => return PlayerAction::RotateClockwise,
+				Char('e') | Char('у')         => return PlayerAction::RotateCounterClockwise,
+				Char('q') | Char('й') | Esc   => return PlayerAction::Exit,
+				Char('p') | Char('з')         => return PlayerAction::TogglePause,
+				_ => {}
 			}
 		}
 
@@ -221,12 +283,8 @@ impl PlayerAction {
 enum NextUpdateAction {
 	Continue,
 	Exit,
-	//ChangeState(Box<dyn State>)
 }
 
-// Подразумевается также лобби и GameOverState, но я уже хочу поскорее закончить
-// Иначе там огого расширять и писать: рендеринг других стейтов, обработка ввода,
-// и так далее.
 trait State {
 	fn update(&mut self, context: &UpdateContext) -> std::io::Result<NextUpdateAction>;
 	fn render_frame(&self, frame_buffer: &mut String);
@@ -240,14 +298,16 @@ struct GameState {
 	board: Board,
 
 	start_level: u8,
-	lines_hit: u16, // До 65 536
-	score: u32,     // До 4 294 967 296
+	lines_hit: u16,
+	score: u32,
 
 	is_paused: bool,
+	game_over: bool,
 
 	last_figure_lowering_time: Instant,
 	stopwatch: Stopwatch,
 }
+
 impl GameState {
 	pub fn new(start_level: u8) -> Self {
 		let mut rng = rng();
@@ -265,17 +325,14 @@ impl GameState {
 			score: 0,
 
 			is_paused: false,
+			game_over: false,
 
 			last_figure_lowering_time: Instant::now(),
 			stopwatch: Stopwatch::start_new(),
 		}
 	}
 
-	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
 	fn toggle_pause(&mut self) {
-		// При снятии паузы игра должна провисеть 1 секунду,
-		// чтобы игрок увидел где текущая фигура и какая следующая
-
 		self.is_paused = !self.is_paused;
 
 		match self.is_paused {
@@ -287,11 +344,7 @@ impl GameState {
 	fn figure_lowering_duration(&self) -> Duration {
 		let level = self.level();
 		match level {
-			// 0-8 ур. от 800мс до 100мс с линейным изменением
-			// 1мс = 1000мкс
 			0..=8 => Duration::from_micros(800_000 - (83_500 * level as u64)),
-			// 9-29 - это 100 - (16.5*i) с округлением вниз, и сразу для 2х уровней
-			// С формулой мудрить не стал
 			9 => Duration::from_millis(100),
 			10..=12 => Duration::from_millis(83),
 			13..=15 => Duration::from_millis(67),
@@ -304,11 +357,46 @@ impl GameState {
 	fn level(&self) -> u8 {
 		(self.start_level as u16 + (self.lines_hit / 10)) as u8
 	}
+
+	fn add_score_for_lines(&mut self, lines: u8) {
+		let points = match lines {
+			1 => 40,
+			2 => 100,
+			3 => 300,
+			4 => 1200,
+			_ => 0,
+		} * (self.level() as u32 + 1);
+		self.score += points;
+		self.lines_hit += lines as u16;
+	}
+
+	/// Пытается заспавнить новую фигуру. Если не получается — устанавливает game_over = true
+	fn spawn_new_figure(&mut self) {
+		let mut rng = rng();
+		self.current_figure = std::mem::replace(&mut self.next_figure, Figure::choose_random(&mut rng));
+		self.current_position = Point::new(self.board.size.width / 2, 0);
+
+		if !self.board.can_place(&self.current_figure, &self.current_position) {
+			self.game_over = true;
+		}
+	}
+
+	/// Размещает текущую фигуру на доске, начисляет очки и спавнит новую
+	fn drop_current_figure(&mut self) {
+		let cleared = self.board.drop_figure(&self.current_figure, self.current_position.x);
+		self.add_score_for_lines(cleared);
+		self.spawn_new_figure();
+		self.last_figure_lowering_time = Instant::now(); // сброс таймера для новой фигуры
+	}
 }
 
 impl State for GameState {
 	fn update(&mut self, context: &UpdateContext) -> std::io::Result<NextUpdateAction> {
-		// Обработка ввода //
+		if self.game_over {
+			return Ok(NextUpdateAction::Exit);
+		}
+
+		// Обработка ввода
 		let last_released_keys = collect_last_key_events()?;
 		if !last_released_keys.is_empty() {
 			for key_event in last_released_keys.iter() {
@@ -322,45 +410,71 @@ impl State for GameState {
 				}
 
 				if self.is_paused {
-					return Ok(NextUpdateAction::Continue);
+					continue;
 				}
 
 				match action {
-					MoveDown => self.last_figure_lowering_time = context.frame_start_time,
-					Drop => { }
-					MoveLeft => { }
-					ModeRight => { }
-					RotateClockwise => self.current_figure.rotate(true),
-					RotateCounterClockwise => self.current_figure.rotate(false),
+					MoveLeft => {
+						if self.current_position.x > 0 {
+							let new_pos = Point::new(self.current_position.x - 1, self.current_position.y);
+							if self.board.can_place(&self.current_figure, &new_pos) {
+								self.current_position = new_pos;
+							}
+						}
+					}
+					MoveRight => {
+						let new_pos = Point::new(self.current_position.x + 1, self.current_position.y);
+						if self.board.can_place(&self.current_figure, &new_pos) {
+							self.current_position = new_pos;
+						}
+					}
+					MoveDown => {
+						let new_pos = Point::new(self.current_position.x, self.current_position.y + 1);
+						if self.board.can_place(&self.current_figure, &new_pos) {
+							self.current_position = new_pos;
+							self.last_figure_lowering_time = context.frame_start_time;
+						} else {
+							self.drop_current_figure();
+						}
+					}
+					Drop => {
+						let drop_y = self.board.drop_position(&self.current_figure, self.current_position.x).y;
+						self.current_position.y = drop_y;
+						self.drop_current_figure();
+					}
+					RotateClockwise => {
+						let rotated = self.current_figure.rotated(true);
+						if self.board.can_place(&rotated, &self.current_position) {
+							self.current_figure = rotated;
+						}
+					}
+					RotateCounterClockwise => {
+						let rotated = self.current_figure.rotated(false);
+						if self.board.can_place(&rotated, &self.current_position) {
+							self.current_figure = rotated;
+						}
+					}
 					_ => {}
 				}
 			}
 		}
 
-		// Опускание фигуры //
-		if context.frame_start_time.duration_since(
-			self.last_figure_lowering_time
-		) > self.figure_lowering_duration() {
-			self.current_position.y += 1;
-
-			self.last_figure_lowering_time = context.frame_start_time;
+		// Опускание по времени
+		if !self.is_paused && !self.game_over {
+			if context.frame_start_time.duration_since(self.last_figure_lowering_time) > self.figure_lowering_duration() {
+				let new_pos = Point::new(self.current_position.x, self.current_position.y + 1);
+				if self.board.can_place(&self.current_figure, &new_pos) {
+					self.current_position = new_pos;
+				} else {
+					self.drop_current_figure();
+				}
+				self.last_figure_lowering_time = context.frame_start_time;
+			}
 		}
 
 		Ok(NextUpdateAction::Continue)
 	}
 
-	/*
-УРОВЕНЬ: 9999    <! . . . . . . . . .!>  ВПРАВО:    [→ / D]
-ВРЕМЯ:   999:59  <! .[][][] . . . . .!>  ВЛЕВО:     [← / A]
-СЧЁТ:    170     <! . . .[] . . . . .!>  ВНИЗ:      [↓ / S]
-                 <! . . . . . . . . .!>  ОПУСТИТЬ:  [SPACE]
-     [][][]      <! . . . .[] . . . .!>  ПОВЕРНУТЬ: [Q] & [E / ↑]
-     []          <! . . . .[][][] . .!>
-                 <![] * * *[][] . .[]!>
-                 <![][][] *[][][][][]!>  ПАУЗА: [P]
-                 <!==================!>  ВЫЙТИ: [ESC]
-                   \/\/\/\/\/\/\/\/\/
-	*/
 	fn render_frame(&self, frame_buffer: &mut String) {
 		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
@@ -379,7 +493,8 @@ impl State for GameState {
 		const PAUSE_LABEL_OPENING: char = '[';
 		const PAUSE_LABEL_CLOSING: char = ']';
 
-		let statistics_part: Vec<String> = (|| { // <- Анонимная функция!
+		// Статистическая часть (слева)
+		let statistics_part: Vec<String> = {
 			let round_total_seconds = self.stopwatch.elapsed().as_secs();
 			let label_and_value = [
 				("УРОВЕНЬ:", self.level().to_string()),
@@ -397,28 +512,20 @@ impl State for GameState {
 				.unwrap_or(0);
 
 			let mut lines = Vec::from_iter(label_and_value.iter()
-				.map(
-					|(label, value)|
+				.map(|(label, value)|
 					format!("{:<max_labels_width$} {:<max_values_width$}", label, value)
 				)
 			);
 
-			// Следующая фигура не должна отображаться при паузе
-			if self.is_paused {
-				return lines;
-			}
-
-			let mut next_figure_part: Vec<String> = vec![];
-			{
+			if !self.is_paused {
 				let figure = &self.next_figure;
 				let next_figure_width = figure.size.width;
+				let mut next_figure_part: Vec<String> = vec![];
 				for row in 0..figure.size.height {
 					let start_index = row * next_figure_width;
 					let cells_row = &figure.cells[start_index..start_index + next_figure_width];
 
 					next_figure_part.push(
-						// Для корректной работы центрирования нужно всунуть здесь пару пробелов в начале
-						// Возможно, есть более идиоматичные способы, но я не стал заморачиваться
 						iter::once([' '; GAP_BETWEEN_PARTS])
 						.chain(
 							cells_row.iter().map(|cell| {
@@ -429,71 +536,78 @@ impl State for GameState {
 						.collect::<String>()
 					);
 				}
-			}
 
-			// Отступ в 1 строку
-			let actual_width = lines.required_width();
-			lines.push(String::from_iter(iter::repeat(' ').take(actual_width)));
+				let actual_width = lines.required_width();
+				lines.push(String::from_iter(iter::repeat(' ').take(actual_width)));
 
-			for line in next_figure_part.iter() {
-				lines.push(format!("{:^actual_width$}", line));
+				for line in next_figure_part.iter() {
+					lines.push(format!("{:^actual_width$}", line));
+				}
 			}
 
 			lines
-		})();
+		};
 
+		// Доска (справа) с текущей фигурой и тенью
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
 			let board_width = self.board.size.width;
 			let pause_label_row = (self.board.size.height / 2) - 1;
 
-			// Текущая фигура не должна отображаться при паузе
+			// Тень (если не пауза)
+			let shadow_pos = if !self.is_paused {
+				self.board.drop_position(&self.current_figure, self.current_position.x)
+			} else {
+				self.current_position // не используется
+			};
 
 			for row in 0..self.board.size.height {
-				let start_index = row * board_width;
-				let cells_row = &self.board.cells[start_index..start_index + board_width];
+				if self.is_paused && row == pause_label_row {
+					let mut line = String::new();
+					line.push_pixel(LEFT_BORDER);
 
-				lines.push(
-					if !(self.is_paused && row == pause_label_row) {
-						iter::once(LEFT_BORDER)
-						.chain(cells_row.iter().map(|cell| {
-							if *cell {FIGURE_CELL} else {EMPTY_CELL}
-						}))
-						.chain(iter::once(RIGHT_BORDER))
-						.flatten()
-						.collect::<String>()
-					} else {
-						let mut line = String::new();
-						line.push(LEFT_BORDER[0]);
-						line.push(LEFT_BORDER[1]);
+					let width = board_width * PIXEL_LENGTH;
+					let label = format!("{} ПАУЗА {}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING);
+					let label_len = label.chars().count();
 
-						let width = board_width * PIXEL_LENGTH;
+					let paddings_sum = width.saturating_sub(label_len);
+					let left_padding = paddings_sum / 2;
+					let right_padding = paddings_sum - left_padding;
 
-						let label = format!("{} ПАУЗА {}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING);
-						let label_len = label.chars().count();
-
-						// Отступы с двух сторон
-						let paddings_sum = width.saturating_sub(label_len);
-						let left_padding = paddings_sum / 2;
-						let right_padding = paddings_sum - left_padding;
-
-						for _ in 0..left_padding {
-							line.push(PAUSE_LABEL_FILLER);
-						}
-						line.push_str(&label);
-						for _ in 0..right_padding {
-							line.push(PAUSE_LABEL_FILLER);
-						}
-
-						line.push(RIGHT_BORDER[0]);
-						line.push(RIGHT_BORDER[1]);
-
-						line
+					for _ in 0..left_padding {
+						line.push(PAUSE_LABEL_FILLER);
 					}
-				);
+					line.push_str(&label);
+					for _ in 0..right_padding {
+						line.push(PAUSE_LABEL_FILLER);
+					}
+
+					line.push_pixel(RIGHT_BORDER);
+					lines.push(line);
+				} else {
+					let mut line = String::new();
+					line.push_pixel(LEFT_BORDER);
+
+					for col in 0..board_width {
+						let pixel = if !self.is_paused && self.current_figure.covers(row, col, &self.current_position) {
+							FIGURE_CELL
+						} else if !self.is_paused && self.current_figure.covers(row, col, &shadow_pos) {
+							PREVIEW_CELL
+						} else if self.board.cells[row * board_width + col] {
+							FIGURE_CELL
+						} else {
+							EMPTY_CELL
+						};
+						line.push(pixel[0]);
+						line.push(pixel[1]);
+					}
+
+					line.push_pixel(RIGHT_BORDER);
+					lines.push(line);
+				}
 			}
 
-			// Bottom line
+			// Нижняя граница
 			lines.push(
 				iter::once(LEFT_BORDER)
 				.chain(iter::repeat_n(BOTTOM_BORDER, board_width))
@@ -502,7 +616,7 @@ impl State for GameState {
 				.collect::<String>()
 			);
 
-			// Closing line
+			// Замыкающая линия
 			lines.push(
 				iter::once(BOTTOM_CLOSING_LEFT_BORDER)
 				.chain(iter::repeat_n(BOTTOM_CLOSING, board_width))
@@ -523,26 +637,25 @@ impl State for GameState {
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			use EitherOrBoth::*;
 
-			let stat_and_board_lines: (&str, &str) = match pair {
-				Both(stat, board) => (stat, board),
-				Left(stat) => (stat, ""),
-				Right(board) => ("", board),
+			let (stat_line, board_line) = match pair {
+				Both(stat, board) => (stat.as_str(), board.as_str()),
+				Left(stat) => (stat.as_str(), ""),
+				Right(board) => ("", board.as_str()),
 			};
 
 			frame_buffer.push_str(format!(
 				"{:<stat_part_width$}{gap}{:<board_part_width$}\n",
-				stat_and_board_lines.0, stat_and_board_lines.1,
+				stat_line, board_line,
 			).as_str());
 		}
 	}
 }
 
-
 type FigureCells = BitArray<[u8; 1]>;
 #[derive(Clone)]
 struct Figure {
 	size: Size,
-	cells: FigureCells, // До 8 клеток
+	cells: FigureCells,
 }
 impl Figure {
 	const fn new(size: Size, cells: FigureCells) -> Self {
@@ -579,63 +692,73 @@ impl Figure {
 		Self { size, cells }
 	}
 
-	// size.area() должен быть == cells.count() !!!
-	// В const контексте нельзя вызвать .count(),
-	// поэтому без конструктора и проверок.
 	const BASE_FIGURES: [Figure; 7] = [
-		// Перевести на это все фигуры, если будет работать
 		Figure::new( // I
 			Size { height: 4, width: 1 },
 			bitarr![const u8, Lsb0; 1, 1, 1, 1]
 		),
-		Figure { // J
-			size: Size { height: 3, width: 2 },
-			cells: bitarr![const u8, Lsb0;
+		Figure::new( // J
+			Size { height: 3, width: 2 },
+			bitarr![const u8, Lsb0;
 				0, 1,
 				0, 1,
 				1, 1,
-			],
-		},
-		Figure { // L
-			size: Size { height: 3, width: 2 },
-			cells: bitarr![const u8, Lsb0;
+			]
+		),
+		Figure::new( // L
+			Size { height: 3, width: 2 },
+			bitarr![const u8, Lsb0;
 				1, 0,
 				1, 0,
 				1, 1,
-			],
-		},
-		Figure { // T
-			size: Size { height: 2, width: 3 },
-			cells: bitarr![const u8, Lsb0;
+			]
+		),
+		Figure::new( // T
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
 				1, 1, 1,
 				0, 1, 0,
-			],
-		},
-		Figure { // S
-			size: Size { height: 2, width: 3 },
-			cells: bitarr![const u8, Lsb0;
+			]
+		),
+		Figure::new( // S
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
 				0, 1, 1,
 				1, 1, 0,
-			],
-		},
-		Figure { // Z
-			size: Size { height: 2, width: 3 },
-			cells: bitarr![const u8, Lsb0;
+			]
+		),
+		Figure::new( // Z
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
 				1, 1, 0,
 				0, 1, 1,
-			],
-		},
-		Figure { // Square
-			size: Size { height: 2, width: 2 },
-			cells: bitarr![const u8, Lsb0;
+			]
+		),
+		Figure::new( // Square
+			Size { height: 2, width: 2 },
+			bitarr![const u8, Lsb0;
 				1, 1,
 				1, 1,
-			],
-		},
+			]
+		),
 	];
 
 	pub fn choose_random(rng: &mut ThreadRng) -> Self {
 		Self::BASE_FIGURES.choose(rng).unwrap().clone()
+	}
+
+	/// Покрывает ли фигура (в позиции pos) клетку (row, col)
+	fn covers(&self, row: usize, col: usize, pos: &Point) -> bool {
+		if row < pos.y || row >= pos.y + self.size.height {
+			return false;
+		}
+		if col < pos.x || col >= pos.x + self.size.width {
+			return false;
+		}
+		let dx = col - pos.x;
+		let dy = row - pos.y;
+		let idx = dy * self.size.width + dx;
+		self.cells[idx]
 	}
 }
 
@@ -672,7 +795,7 @@ const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 
 const ENABLE_FRAMERATE_LIMIT: bool = true;
 const FPS_LIMIT: u16 = 60;
-const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64); // Время на 1 кадр
+const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 
 fn main() -> std::io::Result<()> {
 	let mut out = stdout();
@@ -693,7 +816,6 @@ fn main() -> std::io::Result<()> {
 		use NextUpdateAction::*;
 		match next_update_action {
 			Continue => {},
-			//ChangeState(new_state) => state = new_state,
 			Exit => break,
 		}
 
