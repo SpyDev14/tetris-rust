@@ -1,103 +1,59 @@
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
 use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
-use crossterm::event::KeyEvent;
 use itertools::{EitherOrBoth, Itertools};
 use rand::{
 	rngs::ThreadRng,
 	seq::IndexedRandom,
 	rng,
 };
-
 use crossterm::{
 	ExecutableCommand,
 	style::{
+		Color, SetColors, Colors, ResetColor,
+		Attribute, SetAttribute,
 		Print,
-		Color,
-		SetColors, SetForegroundColor,
-		Colors,
-		ResetColor,
-		SetAttribute,
-		Attribute,
 	},
 	terminal::{self, Clear, ClearType},
 	cursor::{self, MoveTo},
-	event::{self, Event, KeyCode, poll},
+	event::{KeyEvent, KeyCode, KeyModifiers},
 };
 
-// -------------
-#[derive(Debug, Clone, Copy)]
-struct Point {
-	x: usize,
-	y: usize,
+// -- This ------
+pub mod shared;
+pub mod input;
+use crate::shared::*;
+use crate::input::*;
+
+type Pixel = [char; PIXEL_LENGTH];
+const PIXEL_LENGTH: usize = 2;
+
+trait PushPixel {
+	fn push_pixel(&mut self, pixel: Pixel);
 }
-impl Point {
-	#[inline(always)]
-	pub const fn new(x: usize, y: usize) -> Self {
-		Self { x, y }
-	}
-}
-
-#[derive(Clone, Copy)]
-struct Size {
-	height: usize,
-	width: usize,
-}
-impl Size {
-	#[inline(always)]
-	pub const fn new(width: usize, height: usize) -> Self {
-		Self { height, width }
-	}
-	pub fn area(&self) -> usize {
-		self.height * self.width
-	}
-}
-
-struct Stopwatch {
-	total: Duration,
-	start_time: Option<Instant>,
-}
-impl Stopwatch {
-	fn new() -> Self {
-		Self {
-			total: Duration::ZERO,
-			start_time: None,
-		}
-	}
-
-	fn start_new() -> Self {
-		let mut this: Stopwatch = Self::new();
-		this.start();
-
-		this
-	}
-
-	fn start(&mut self) {
-		if self.start_time.is_none() {
-			self.start_time = Some(Instant::now())
-		}
-	}
-
-	fn pause(&mut self) {
-		if let Some(start_time) = self.start_time {
-			self.total += start_time.elapsed();
-			self.start_time = None;
-		}
-	}
-
-	fn elapsed(&self) -> Duration {
-		if let Some(start_time) = self.start_time {
-			self.total + start_time.elapsed()
-		} else {
-			self.total
+impl PushPixel for String {
+	fn push_pixel(&mut self, pixel: Pixel) {
+		for i in 0..PIXEL_LENGTH {
+			self.push(pixel[i]);
 		}
 	}
 }
 
-// -------------
+trait UIElement {
+	fn required_width(&self) -> usize;
+}
+
+impl UIElement for Vec<String> {
+	fn required_width(&self) -> usize {
+		self.iter()
+			.map(|s| s.chars().count())
+			.max()
+			.unwrap_or(0)
+	}
+}
+
 struct Board {
 	size: Size,
 	cells: BitVec,
@@ -199,54 +155,134 @@ impl Board {
 	}
 }
 
-type Pixel = [char; PIXEL_LENGTH];
-const PIXEL_LENGTH: usize = 2;
-
-trait PushPixel {
-	fn push_pixel(&mut self, pixel: Pixel);
+type FigureCells = BitArray<[u8; 1]>;
+#[derive(Clone)]
+struct Figure {
+	size: Size,
+	cells: FigureCells,
 }
-impl PushPixel for String {
-	fn push_pixel(&mut self, pixel: Pixel) {
-		for i in 0..PIXEL_LENGTH {
-			self.push(pixel[i]);
-		}
+impl Figure {
+	const fn new(size: Size, cells: FigureCells) -> Self {
+		Self { size, cells }
 	}
-}
 
-trait UIElement {
-	fn required_width(&self) -> usize;
-}
+	pub fn rotated(&self, by_clockwise: bool) -> Self {
+		let old_h = self.size.height;
+		let old_w = self.size.width;
+		let new_h = old_w;
+		let new_w = old_h;
 
-impl UIElement for Vec<String> {
-	fn required_width(&self) -> usize {
-		self.iter()
-			.map(|s| s.chars().count())
-			.max()
-			.unwrap_or(0)
-	}
-}
+		let mut new_cells = FigureCells::ZERO;
+		for y in 0..old_h {
+			for x in 0..old_w {
+				if self.cells[y * old_w + x] {
+					let new_x; let new_y;
+					if by_clockwise {
+						new_x = old_h - 1 - y;
+						new_y = x;
+					} else {
+						new_x = y;
+						new_y = new_h - 1 - x;
+					}
 
-fn collect_last_key_events() -> std::io::Result<Vec<KeyEvent>>{
-	let mut events_buffer: VecDeque<event::KeyEvent> = VecDeque::new();
-
-	while poll(Duration::from_millis(0))? {
-		match event::read()? {
-			Event::Key(key_event) => {
-				events_buffer.push_back(key_event);
+					new_cells.set(new_y * new_w + new_x, true);
+				}
 			}
-			_ => {}
 		}
+
+		let size = Size { height: new_h, width: new_w };
+		let cells = new_cells;
+
+		Self { size, cells }
 	}
 
-	Ok(Vec::from(events_buffer))
+	const BASE_FIGURES: [Figure; 7] = [
+		Figure::new( // I
+			Size { height: 4, width: 1 },
+			bitarr![const u8, Lsb0; 1, 1, 1, 1]
+		),
+		Figure::new( // J
+			Size { height: 3, width: 2 },
+			bitarr![const u8, Lsb0;
+				0, 1,
+				0, 1,
+				1, 1,
+			]
+		),
+		Figure::new( // L
+			Size { height: 3, width: 2 },
+			bitarr![const u8, Lsb0;
+				1, 0,
+				1, 0,
+				1, 1,
+			]
+		),
+		Figure::new( // T
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
+				1, 1, 1,
+				0, 1, 0,
+			]
+		),
+		Figure::new( // S
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
+				0, 1, 1,
+				1, 1, 0,
+			]
+		),
+		Figure::new( // Z
+			Size { height: 2, width: 3 },
+			bitarr![const u8, Lsb0;
+				1, 1, 0,
+				0, 1, 1,
+			]
+		),
+		Figure::new( // Square
+			Size { height: 2, width: 2 },
+			bitarr![const u8, Lsb0;
+				1, 1,
+				1, 1,
+			]
+		),
+	];
+
+	pub fn choose_random(rng: &mut ThreadRng) -> Self {
+		Self::BASE_FIGURES.choose(rng).unwrap().clone()
+	}
+
+	/// Покрывает ли фигура (в позиции pos) клетку (row, col)
+	fn covers(&self, row: usize, col: usize, pos: &Point) -> bool {
+		if row < pos.y || row >= pos.y + self.size.height {
+			return false;
+		}
+		if col < pos.x || col >= pos.x + self.size.width {
+			return false;
+		}
+		let dx = col - pos.x;
+		let dy = row - pos.y;
+		let idx = dy * self.size.width + dx;
+		self.cells[idx]
+	}
 }
 
-struct UpdateContext {
-	frame_start_time: Instant,
+enum KeyModifier {
+	None,
+	Ctrl,
+	Shift,
+	//ShiftCtrl
 }
+impl KeyModifier {
+	pub fn from_key_modifiers(modifiers: &KeyModifiers) -> Self {
+		if modifiers.contains(KeyModifiers::CONTROL) { Self::Ctrl }
+		else if modifiers.contains(KeyModifiers::SHIFT) { Self::Shift }
+		else { Self::None }
+	}
+}
+
 
 #[derive(PartialEq)]
-enum PlayerAction {
+pub enum PlayerAction {
 	MoveLeft,
 	MoveRight,
 	MoveDown,
@@ -255,23 +291,29 @@ enum PlayerAction {
 	RotateCounterClockwise,
 	TogglePause,
 	Exit,
+	Restart,
 
 	DoNothing,
 }
+// TODO: Переработать, так как у каждого состояния свои действия, здесь всё под GameState
 impl PlayerAction {
 	pub fn from_key_event(event: KeyEvent) -> Self {
+		use PlayerAction::*;
 		use KeyCode::*;
+		use KeyModifier::*;
 
 		if !event.is_release() {
-			match event.code {
-				Char('a') | Char('ф') | Left  => return PlayerAction::MoveLeft,
-				Char('d') | Char('в') | Right => return PlayerAction::MoveRight,
-				Char('s') | Char('ы') | Down  => return PlayerAction::MoveDown,
-				Char(' ')                     => return PlayerAction::Drop,
-				Char('w') | Char('ц') | Up    => return PlayerAction::RotateClockwise,
-				Char('e') | Char('у')         => return PlayerAction::RotateCounterClockwise,
-				Char('q') | Char('й') | Esc   => return PlayerAction::Exit,
-				Char('p') | Char('з')         => return PlayerAction::TogglePause,
+			let modifier = KeyModifier::from_key_modifiers(&event.modifiers);
+			match (modifier, event.code) {
+				(_, Char('a') | Char('ф') | Left)  => return MoveLeft,
+				(_, Char('d') | Char('в') | Right) => return MoveRight,
+				(_, Char('s') | Char('ы') | Down)  => return MoveDown,
+				(_, Char(' '))                     => return Drop,
+				(_, Char('q') | Char('й') | Char('w') | Char('ц') | Up) => return RotateClockwise,
+				(_, Char('e') | Char('у'))         => return RotateCounterClockwise,
+				(_, Esc)                           => return Exit,
+				(Ctrl, Char('c') | Char('с'))      => return Exit,
+				(_, Char('p') | Char('з'))         => return TogglePause,
 				_ => {}
 			}
 		}
@@ -280,6 +322,9 @@ impl PlayerAction {
 	}
 }
 
+struct UpdateContext {
+	frame_start_time: Instant,
+}
 enum NextUpdateAction {
 	Continue,
 	Exit,
@@ -651,117 +696,6 @@ impl State for GameState {
 	}
 }
 
-type FigureCells = BitArray<[u8; 1]>;
-#[derive(Clone)]
-struct Figure {
-	size: Size,
-	cells: FigureCells,
-}
-impl Figure {
-	const fn new(size: Size, cells: FigureCells) -> Self {
-		Self { size, cells }
-	}
-
-	pub fn rotated(&self, by_clockwise: bool) -> Self {
-		let old_h = self.size.height;
-		let old_w = self.size.width;
-		let new_h = old_w;
-		let new_w = old_h;
-
-		let mut new_cells = FigureCells::ZERO;
-		for y in 0..old_h {
-			for x in 0..old_w {
-				if self.cells[y * old_w + x] {
-					let new_x; let new_y;
-					if by_clockwise {
-						new_x = old_h - 1 - y;
-						new_y = x;
-					} else {
-						new_x = y;
-						new_y = new_h - 1 - x;
-					}
-
-					new_cells.set(new_y * new_w + new_x, true);
-				}
-			}
-		}
-
-		let size = Size { height: new_h, width: new_w };
-		let cells = new_cells;
-
-		Self { size, cells }
-	}
-
-	const BASE_FIGURES: [Figure; 7] = [
-		Figure::new( // I
-			Size { height: 4, width: 1 },
-			bitarr![const u8, Lsb0; 1, 1, 1, 1]
-		),
-		Figure::new( // J
-			Size { height: 3, width: 2 },
-			bitarr![const u8, Lsb0;
-				0, 1,
-				0, 1,
-				1, 1,
-			]
-		),
-		Figure::new( // L
-			Size { height: 3, width: 2 },
-			bitarr![const u8, Lsb0;
-				1, 0,
-				1, 0,
-				1, 1,
-			]
-		),
-		Figure::new( // T
-			Size { height: 2, width: 3 },
-			bitarr![const u8, Lsb0;
-				1, 1, 1,
-				0, 1, 0,
-			]
-		),
-		Figure::new( // S
-			Size { height: 2, width: 3 },
-			bitarr![const u8, Lsb0;
-				0, 1, 1,
-				1, 1, 0,
-			]
-		),
-		Figure::new( // Z
-			Size { height: 2, width: 3 },
-			bitarr![const u8, Lsb0;
-				1, 1, 0,
-				0, 1, 1,
-			]
-		),
-		Figure::new( // Square
-			Size { height: 2, width: 2 },
-			bitarr![const u8, Lsb0;
-				1, 1,
-				1, 1,
-			]
-		),
-	];
-
-	pub fn choose_random(rng: &mut ThreadRng) -> Self {
-		Self::BASE_FIGURES.choose(rng).unwrap().clone()
-	}
-
-	/// Покрывает ли фигура (в позиции pos) клетку (row, col)
-	fn covers(&self, row: usize, col: usize, pos: &Point) -> bool {
-		if row < pos.y || row >= pos.y + self.size.height {
-			return false;
-		}
-		if col < pos.x || col >= pos.x + self.size.width {
-			return false;
-		}
-		let dx = col - pos.x;
-		let dy = row - pos.y;
-		let idx = dy * self.size.width + dx;
-		self.cells[idx]
-	}
-}
-
 fn draw_frame(rendered_frame: &String) -> std::io::Result<()> {
 	let mut out: Stdout = stdout();
 	out.execute(MoveTo(0, 0))?;
@@ -781,10 +715,11 @@ fn on_programm_enter(out: &mut Stdout) -> std::io::Result<()> {
 fn on_programm_exit(out: &mut Stdout, rendered_frame: &String) -> std::io::Result<()> {
 	out.execute(ResetColor)?;
 	out.execute(Clear(ClearType::All))?;
-	out.execute(SetForegroundColor(FOREGROUND_COLOR))?;
+	out.execute(SetColors(Colors::new(FOREGROUND_COLOR, BACKGROUND_COLOR)))?;
+	out.execute(SetAttribute(Attribute::Bold))?;
 	draw_frame(rendered_frame)?;
-	out.execute(SetAttribute(Attribute::NoBold))?;
 	out.execute(ResetColor)?;
+	//out.execute(SetAttribute(Attribute::NoBold))?; // Почему-то включает подчёркивание
 	out.execute(cursor::Show)?;
 	terminal::disable_raw_mode()?;
 	Ok(())
@@ -792,10 +727,10 @@ fn on_programm_exit(out: &mut Stdout, rendered_frame: &String) -> std::io::Resul
 
 type ColorTheme = (Color, Color);
 
-// Сделал бы стейт настроек с кастомизацией, а так только во время компиляции
-const GREEN_THEME: ColorTheme = (Color::Rgb { r: 24, g: 190, b: 12 }, Color::Rgb { r: 4, g: 12, b: 2 });
+// Сделать бы стейт настроек с кастомизацией, а так только во время компиляции
+const _GREEN_THEME: ColorTheme = (Color::Rgb { r: 24, g: 190, b: 12 }, Color::Rgb { r: 4, g: 12, b: 2 });
 const _ORANGE_THEME: ColorTheme = (Color::Rgb { r: 255, g: 94, b: 0 }, Color::Rgb { r: 20, g: 8, b: 0 });
-const THEME: ColorTheme = GREEN_THEME;
+const THEME: ColorTheme = _ORANGE_THEME;
 
 const FOREGROUND_COLOR: Color = THEME.0;
 const BACKGROUND_COLOR: Color = THEME.1;
