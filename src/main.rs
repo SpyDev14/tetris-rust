@@ -266,21 +266,6 @@ impl Figure {
 	}
 }
 
-enum KeyModifier {
-	None,
-	Ctrl,
-	Shift,
-	//ShiftCtrl
-}
-impl KeyModifier {
-	pub fn from_key_modifiers(modifiers: &KeyModifiers) -> Self {
-		if modifiers.contains(KeyModifiers::CONTROL) { Self::Ctrl }
-		else if modifiers.contains(KeyModifiers::SHIFT) { Self::Shift }
-		else { Self::None }
-	}
-}
-
-
 #[derive(PartialEq)]
 pub enum PlayerAction {
 	MoveLeft,
@@ -300,20 +285,22 @@ impl PlayerAction {
 	pub fn from_key_event(event: KeyEvent) -> Self {
 		use PlayerAction::*;
 		use KeyCode::*;
-		use KeyModifier::*;
 
 		if !event.is_release() {
-			let modifier = KeyModifier::from_key_modifiers(&event.modifiers);
-			match (modifier, event.code) {
-				(_, Char('a') | Char('ф') | Left)  => return MoveLeft,
-				(_, Char('d') | Char('в') | Right) => return MoveRight,
-				(_, Char('s') | Char('ы') | Down)  => return MoveDown,
-				(_, Char(' '))                     => return Drop,
-				(_, Char('q') | Char('й') | Char('w') | Char('ц') | Up) => return RotateClockwise,
-				(_, Char('e') | Char('у'))         => return RotateCounterClockwise,
-				(_, Esc)                           => return Exit,
-				(Ctrl, Char('c') | Char('с'))      => return Exit,
-				(_, Char('p') | Char('з'))         => return TogglePause,
+			let has_shift = event.modifiers.contains(KeyModifiers::SHIFT);
+			let has_ctrl  = event.modifiers.contains(KeyModifiers::CONTROL);
+
+			match (has_shift, has_ctrl, event.code) {
+				(_, _, Char('a') | Char('ф') | Left)  => return MoveLeft,
+				(_, _, Char('d') | Char('в') | Right) => return MoveRight,
+				(_, _, Char('s') | Char('ы') | Down)  => return MoveDown,
+				(_, _, Char(' '))                     => return Drop,
+				(_, _, Char('q') | Char('й'))         => return RotateClockwise,
+				(_, _, Char('w') | Char('ц') | Up)    => return RotateClockwise,
+				(_, _, Char('e') | Char('у'))         => return RotateCounterClockwise,
+				(_, _, Esc)                           => return Exit,
+				(_, true, Char('c') | Char('с'))      => return Exit,
+				(_, _, Char('p') | Char('з'))         => return TogglePause,
 				_ => {}
 			}
 		}
